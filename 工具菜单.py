@@ -70,6 +70,7 @@ class ToolMenuApp:
             {"name": "参数扫描工具", "description": "批量查看、编辑、管理代码参数", "file": "tools/param_scanner_gui.py", "icon": "⚙️", "env": None},
             {"name": "文件批量重命名", "description": "批量重命名文件，支持多种命名规则", "file": "tools/change_name.py", "icon": "🔄", "env": None},
             {"name": "视频抽帧工具", "description": "从视频中提取帧图片", "file": "tools/frame_extract.py", "icon": "🎬", "env": None},
+            {"name": "图片转RGB565", "description": "将图片转换为RGB565的C数组（STM32屏幕显示）", "file": "tools/img2rgb565_gui.py", "icon": "🖼️", "env": None},
             {"name": "进度条标定尺", "description": "透明进度条标定工具", "file": "tools/ruler.py", "icon": "📏", "env": None},
             {"name": "模型训练工具", "description": "训练机器学习模型（自动激活YOLO环境）", "file": "tools/model_train.py", "icon": "🤖", "env": "yolov5"}
         ]

@@ -36,13 +36,15 @@ class YOLODataPrepApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 创建五个选项卡
+        # 创建六个选项卡
+        self.oneclick_tab = ttk.Frame(self.notebook)  # 一键处理
         self.prep_tab = ttk.Frame(self.notebook)  # 图片预处理
         self.wizard_tab = ttk.Frame(self.notebook)  # 配置向导
         self.train_tab = ttk.Frame(self.notebook)  # 训练
         self.test_tab = ttk.Frame(self.notebook)  # 测试
         self.export_tab = ttk.Frame(self.notebook)  # 模型导出
 
+        self.notebook.add(self.oneclick_tab, text="⚡ 一键处理")
         self.notebook.add(self.prep_tab, text="📸 图片预处理")
         self.notebook.add(self.wizard_tab, text="📋 配置向导")
         self.notebook.add(self.train_tab, text="🚀 训练")
@@ -50,6 +52,7 @@ class YOLODataPrepApp:
         self.notebook.add(self.export_tab, text="📦 模型导出")
 
         # 初始化各选项卡
+        self.setup_oneclick_tab()
         self.setup_prep_tab()
         self.setup_wizard_tab()
         self.setup_train_tab()
@@ -94,6 +97,339 @@ class YOLODataPrepApp:
         style.configure('TLabelframe', font=('微软雅黑', 9, 'bold'))
         style.configure('TLabelframe.Label', font=('微软雅黑', 9, 'bold'))
         style.configure('Success.TButton', foreground='white', background='#4CAF50')
+
+    # ==================== 一键处理选项卡 ====================
+    def setup_oneclick_tab(self):
+        """设置一键处理选项卡"""
+        main_frame = ttk.Frame(self.oneclick_tab, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 标题
+        title = ttk.Label(main_frame, text="⚡ 一键处理数据集", font=('微软雅黑', 14, 'bold'), foreground='#FF5722')
+        title.pack(anchor=tk.W, pady=(0, 20))
+
+        # 说明
+        desc = ttk.Label(main_frame, text="自动完成：图片预处理 → 生成data.yaml → 开始训练", 
+                         font=('微软雅黑', 10), foreground='#666')
+        desc.pack(anchor=tk.W, pady=(0, 15))
+
+        # 输入设置
+        input_frame = ttk.LabelFrame(main_frame, text="输入设置", padding="15")
+        input_frame.pack(fill=tk.X, pady=(0, 15))
+
+        # 原始数据目录
+        row1 = ttk.Frame(input_frame)
+        row1.pack(fill=tk.X, pady=3)
+        ttk.Label(row1, text="原始数据目录:", width=12).pack(side=tk.LEFT)
+        self.oneclick_input = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data")
+        ttk.Entry(row1, textvariable=self.oneclick_input, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(row1, text="📁", command=lambda: self.browse_dir(self.oneclick_input), width=3).pack(side=tk.RIGHT)
+
+        # 输出目录
+        row2 = ttk.Frame(input_frame)
+        row2.pack(fill=tk.X, pady=3)
+        ttk.Label(row2, text="输出目录:", width=12).pack(side=tk.LEFT)
+        self.oneclick_output = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\processed")
+        ttk.Entry(row2, textvariable=self.oneclick_output, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(row2, text="📁", command=lambda: self.browse_dir(self.oneclick_output), width=3).pack(side=tk.RIGHT)
+
+        # 数据集名称
+        row3 = ttk.Frame(input_frame)
+        row3.pack(fill=tk.X, pady=3)
+        ttk.Label(row3, text="数据集名称:", width=12).pack(side=tk.LEFT)
+        self.oneclick_name = tk.StringVar(value="soldier_dataset_320")
+        ttk.Entry(row3, textvariable=self.oneclick_name, width=30).pack(side=tk.LEFT, padx=5)
+
+        # 训练参数
+        params_frame = ttk.LabelFrame(main_frame, text="训练参数", padding="15")
+        params_frame.pack(fill=tk.X, pady=(0, 15))
+
+        params_row1 = ttk.Frame(params_frame)
+        params_row1.pack(fill=tk.X, pady=3)
+
+        ttk.Label(params_row1, text="模型:").pack(side=tk.LEFT)
+        self.oneclick_model = tk.StringVar(value="yolov5s.pt")
+        ttk.Combobox(params_row1, textvariable=self.oneclick_model,
+                     values=["yolov5n.pt", "yolov5s.pt", "yolov5m.pt", "yolov5l.pt", "yolov5x.pt",
+                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt"],
+                     width=12).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(params_row1, text="图片尺寸:").pack(side=tk.LEFT, padx=(20, 0))
+        self.oneclick_imgsz = tk.StringVar(value="320")
+        ttk.Combobox(params_row1, textvariable=self.oneclick_imgsz, 
+                     values=["320", "416", "640"], width=8).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(params_row1, text="训练轮次:").pack(side=tk.LEFT, padx=(20, 0))
+        self.oneclick_epochs = tk.StringVar(value="100")
+        ttk.Entry(params_row1, textvariable=self.oneclick_epochs, width=8).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(params_row1, text="批次大小:").pack(side=tk.LEFT, padx=(20, 0))
+        self.oneclick_batch = tk.StringVar(value="16")
+        ttk.Entry(params_row1, textvariable=self.oneclick_batch, width=8).pack(side=tk.LEFT, padx=5)
+
+        params_row2 = ttk.Frame(params_frame)
+        params_row2.pack(fill=tk.X, pady=3)
+
+        ttk.Label(params_row2, text="设备:").pack(side=tk.LEFT)
+        self.oneclick_device = tk.StringVar(value="cpu")
+        ttk.Radiobutton(params_row2, text="CPU", variable=self.oneclick_device, value="cpu").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(params_row2, text="GPU", variable=self.oneclick_device, value="gpu").pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(params_row2, text="验证集比例:").pack(side=tk.LEFT, padx=(20, 0))
+        self.oneclick_val_ratio = tk.StringVar(value="0.2")
+        ttk.Entry(params_row2, textvariable=self.oneclick_val_ratio, width=8).pack(side=tk.LEFT, padx=5)
+
+        # 进度显示
+        progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="10")
+        progress_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+
+        self.oneclick_output_text = ScrolledText(progress_frame, height=15, font=('Consolas', 9))
+        self.oneclick_output_text.pack(fill=tk.BOTH, expand=True)
+
+        # 控制按钮
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X)
+
+        self.oneclick_btn = ttk.Button(btn_frame, text="🚀 一键处理并训练", command=self.run_oneclick, width=20)
+        self.oneclick_btn.pack(side=tk.LEFT, padx=5)
+
+        self.oneclick_stop_btn = ttk.Button(btn_frame, text="⏹ 停止", command=self.stop_oneclick, state=tk.DISABLED, width=10)
+        self.oneclick_stop_btn.pack(side=tk.LEFT, padx=5)
+
+    def run_oneclick(self):
+        """执行一键处理"""
+        input_dir = self.oneclick_input.get()
+        if not os.path.exists(input_dir):
+            messagebox.showerror("错误", f"输入目录不存在: {input_dir}")
+            return
+
+        self.oneclick_btn.config(state=tk.DISABLED)
+        self.oneclick_stop_btn.config(state=tk.NORMAL)
+        self.oneclick_output_text.delete('1.0', tk.END)
+
+        def process():
+            try:
+                # 步骤1: 检查输入目录结构
+                self.append_oneclick_output("📁 步骤1: 检查输入目录结构...")
+                
+                images_train = os.path.join(input_dir, "images", "train")
+                labels_train = os.path.join(input_dir, "labels", "train")
+                
+                if not os.path.exists(images_train):
+                    # 尝试其他常见结构
+                    images_train = os.path.join(input_dir, "train", "images")
+                    labels_train = os.path.join(input_dir, "train", "labels")
+                
+                if not os.path.exists(images_train):
+                    self.append_oneclick_output(f"❌ 未找到训练图片目录，请确保目录结构正确")
+                    self.root.after(0, lambda: self.oneclick_finished(False))
+                    return
+
+                self.append_oneclick_output(f"  ✅ 找到图片目录: {images_train}")
+                self.append_oneclick_output(f"  ✅ 找到标签目录: {labels_train}")
+
+                # 步骤2: 创建输出目录
+                self.append_oneclick_output("\n📁 步骤2: 创建输出目录...")
+                output_base = os.path.join(self.oneclick_output.get(), self.oneclick_name.get())
+                out_images_train = os.path.join(output_base, "images", "train")
+                out_labels_train = os.path.join(output_base, "labels", "train")
+                out_images_val = os.path.join(output_base, "images", "val")
+                out_labels_val = os.path.join(output_base, "labels", "val")
+
+                os.makedirs(out_images_train, exist_ok=True)
+                os.makedirs(out_labels_train, exist_ok=True)
+                os.makedirs(out_images_val, exist_ok=True)
+                os.makedirs(out_labels_val, exist_ok=True)
+
+                self.append_oneclick_output(f"  ✅ 输出目录: {output_base}")
+
+                # 步骤3: 处理图片
+                self.append_oneclick_output("\n🖼️ 步骤3: 处理图片...")
+                target_size = int(self.oneclick_imgsz.get())
+                
+                # 获取所有图片
+                image_files = []
+                for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                    image_files.extend(Path(images_train).glob(ext))
+                
+                self.append_oneclick_output(f"  找到 {len(image_files)} 张图片")
+
+                # 按比例划分训练集和验证集
+                val_ratio = float(self.oneclick_val_ratio.get())
+                import random
+                random.shuffle(image_files)
+                val_count = int(len(image_files) * val_ratio)
+                val_files = image_files[:val_count]
+                train_files = image_files[val_count:]
+
+                self.append_oneclick_output(f"  训练集: {len(train_files)} 张, 验证集: {len(val_files)} 张")
+
+                # 处理训练集
+                success, failed = 0, 0
+                for img_path in train_files:
+                    try:
+                        label_path = Path(labels_train) / (img_path.stem + '.txt')
+                        if self.process_single_image(str(img_path), str(label_path) if label_path.exists() else None,
+                                                     out_images_train, out_labels_train, target_size):
+                            success += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        failed += 1
+
+                self.append_oneclick_output(f"  训练集处理完成: 成功 {success}, 失败 {failed}")
+
+                # 处理验证集
+                val_success, val_failed = 0, 0
+                for img_path in val_files:
+                    try:
+                        label_path = Path(labels_train) / (img_path.stem + '.txt')
+                        if self.process_single_image(str(img_path), str(label_path) if label_path.exists() else None,
+                                                     out_images_val, out_labels_val, target_size):
+                            val_success += 1
+                        else:
+                            val_failed += 1
+                    except Exception as e:
+                        val_failed += 1
+
+                self.append_oneclick_output(f"  验证集处理完成: 成功 {val_success}, 失败 {val_failed}")
+
+                # 步骤4: 生成data.yaml
+                self.append_oneclick_output("\n📄 步骤4: 生成data.yaml...")
+                self.generate_data_yaml(output_base)
+                self.append_oneclick_output(f"  ✅ 已生成 data.yaml")
+
+                # 步骤5: 开始训练
+                self.append_oneclick_output("\n🚀 步骤5: 开始训练...")
+                self.root.after(0, lambda: self.start_oneclick_training(output_base))
+
+            except Exception as e:
+                self.append_oneclick_output(f"\n❌ 错误: {e}")
+                self.root.after(0, lambda: self.oneclick_finished(False))
+
+        thread = threading.Thread(target=process)
+        thread.daemon = True
+        thread.start()
+
+    def process_single_image(self, img_path, label_path, out_images_dir, out_labels_dir, target_size):
+        """处理单张图片"""
+        try:
+            img = cv2.imread(img_path)
+            if img is None:
+                return False
+
+            h, w = img.shape[:2]
+            img_resized = cv2.resize(img, (target_size, target_size))
+            
+            # 保存图片
+            out_img_path = os.path.join(out_images_dir, Path(img_path).name)
+            cv2.imwrite(out_img_path, img_resized)
+
+            # 处理标签
+            if label_path and os.path.exists(label_path):
+                with open(label_path, 'r') as f:
+                    labels = f.read()
+                out_label_path = os.path.join(out_labels_dir, Path(img_path).stem + '.txt')
+                with open(out_label_path, 'w') as f:
+                    f.write(labels)
+
+            return True
+        except Exception:
+            return False
+
+    def start_oneclick_training(self, dataset_dir):
+        """开始一键训练"""
+        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+        data_yaml = os.path.join(dataset_dir, 'data.yaml')
+        model_name = self.oneclick_model.get()
+        device_arg = "0" if self.oneclick_device.get() == "gpu" else "cpu"
+
+        if model_name.startswith("yolov5"):
+            cmd = [
+                "python",
+                os.path.join(yolov5_dir, "train.py"),
+                "--data", data_yaml,
+                "--weights", model_name,
+                "--epochs", str(self.oneclick_epochs.get()),
+                "--img", str(self.oneclick_imgsz.get()),
+                "--batch", str(self.oneclick_batch.get()),
+                "--device", device_arg,
+                "--project", dataset_dir,
+                "--name", "runs/detect/train",
+                "--exist-ok"
+            ]
+        else:
+            cmd = [
+                "yolo", "train",
+                f"data={data_yaml}",
+                f"model={model_name}",
+                f"epochs={self.oneclick_epochs.get()}",
+                f"imgsz={self.oneclick_imgsz.get()}",
+                f"batch={self.oneclick_batch.get()}",
+                f"device={device_arg}",
+                f"project={dataset_dir}",
+                "name=runs/detect/train",
+                "exist_ok=True"
+            ]
+
+        self.append_oneclick_output(f"  命令: {' '.join(cmd)}")
+
+        try:
+            import re
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=False,
+                bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            self.oneclick_process = process
+
+            for line in process.stdout:
+                try:
+                    decoded_line = line.decode('utf-8', errors='ignore')
+                except:
+                    decoded_line = line.decode('gbk', errors='ignore')
+                
+                clean_line = ansi_escape.sub('', decoded_line)
+                if clean_line.strip():
+                    self.root.after(0, lambda l=clean_line: self.append_oneclick_output(l))
+
+            process.wait()
+
+            if process.returncode == 0:
+                self.append_oneclick_output("\n✅ 训练完成！")
+                self.root.after(0, lambda: self.oneclick_finished(True))
+            else:
+                self.append_oneclick_output("\n❌ 训练失败")
+                self.root.after(0, lambda: self.oneclick_finished(False))
+
+        except Exception as e:
+            self.append_oneclick_output(f"\n❌ 训练错误: {e}")
+            self.root.after(0, lambda: self.oneclick_finished(False))
+
+    def append_oneclick_output(self, text):
+        """添加一键处理输出"""
+        self.oneclick_output_text.insert(tk.END, text + "\n")
+        self.oneclick_output_text.see(tk.END)
+        self.root.update_idletasks()
+
+    def stop_oneclick(self):
+        """停止一键处理"""
+        if hasattr(self, 'oneclick_process') and self.oneclick_process:
+            self.oneclick_process.terminate()
+            self.append_oneclick_output("\n🛑 已停止")
+            self.oneclick_finished(False)
+
+    def oneclick_finished(self, success):
+        """一键处理完成"""
+        self.oneclick_btn.config(state=tk.NORMAL)
+        self.oneclick_stop_btn.config(state=tk.DISABLED)
+        if success:
+            messagebox.showinfo("完成", "一键处理完成！")
 
     # ==================== 图片预处理选项卡 ====================
     def setup_prep_tab(self):
@@ -803,9 +1139,10 @@ names:
         row6.pack(fill=tk.X, pady=2)
 
         ttk.Label(row6, text="模型版本:", width=10).pack(side=tk.LEFT)
-        self.model = tk.StringVar(value="yolo11n.pt")
+        self.model = tk.StringVar(value="yolov5s.pt")
         ttk.Combobox(row6, textvariable=self.model,
-                     values=["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt"],
+                     values=["yolov5n.pt", "yolov5s.pt", "yolov5m.pt", "yolov5l.pt", "yolov5x.pt",
+                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt"],
                      width=15).pack(side=tk.LEFT)
 
         # 进度显示 - 改为文本显示
@@ -877,53 +1214,69 @@ names:
 
     def update_train_preview(self):
         """更新训练命令预览"""
+        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
         data_yaml = os.path.join(self.train_dataset.get(), 'data.yaml')
         device_arg = "0" if self.device.get() == "gpu" else "cpu"
-        # 训练结果将保存在数据集目录的 runs/detect/ 下
-        cmd = f"yolo train data={data_yaml} model={self.model.get()} epochs={self.epochs.get()} imgsz={self.imgsz.get()} batch={self.batch.get()} device={device_arg} project={self.train_dataset.get()} name=runs/detect/train exist_ok=True"
+        model_name = self.model.get()
+
+        # 根据模型类型选择不同的命令格式
+        if model_name.startswith("yolov5"):
+            cmd = f"python {yolov5_dir}/train.py --data {data_yaml} --weights {model_name} --epochs {self.epochs.get()} --img {self.imgsz.get()} --batch {self.batch.get()} --device {device_arg} --project {self.train_dataset.get()} --name runs/detect/train --exist-ok"
+        else:
+            cmd = f"yolo train data={data_yaml} model={model_name} epochs={self.epochs.get()} imgsz={self.imgsz.get()} batch={self.batch.get()} device={device_arg} project={self.train_dataset.get()} name=runs/detect/train exist_ok=True"
 
         self.preview_text.delete('1.0', tk.END)
         self.preview_text.insert('1.0', cmd)
 
     def start_training(self):
         """开始训练（改进版）- 显示当前训练轮次/总训练轮次"""
+        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
         data_yaml = os.path.join(self.train_dataset.get(), 'data.yaml')
         if not os.path.exists(data_yaml):
             messagebox.showerror("错误", f"data.yaml 不存在: {data_yaml}\n请先在配置向导中创建")
             return
 
-        # 重置进度信息
         self.epoch_info.set("正在初始化...")
         self.loss_info.set("")
 
         device_arg = "0" if self.device.get() == "gpu" else "cpu"
 
-        # 获取模型文件路径 - 优先使用数据集目录下的模型文件
         model_name = self.model.get()
         model_path = os.path.join(self.train_dataset.get(), model_name)
         if not os.path.exists(model_path):
-            # 如果数据集目录下没有，尝试使用当前目录
             model_path = os.path.join(self.current_dir, model_name)
             if not os.path.exists(model_path):
-                # 如果都没有，就使用默认的（YOLO会自动下载）
                 model_path = model_name
                 self.append_train_output(f"⚠️ 未找到本地模型文件 {model_name}，将自动下载\n")
 
-        # 构建命令 - 指定保存到数据集目录的 runs/detect/ 下
-        cmd = [
-            "yolo",
-            "train",
-            f"data={data_yaml}",
-            f"model={model_path}",
-            f"epochs={self.epochs.get()}",
-            f"imgsz={self.imgsz.get()}",
-            f"batch={self.batch.get()}",
-            f"device={device_arg}",
-            f"project={self.train_dataset.get()}",
-            "name=runs/detect/train",
-            "exist_ok=True",
-            "amp=True"
-        ]
+        # 根据模型类型构建不同的命令
+        if model_name.startswith("yolov5"):
+            cmd = [
+                "python",
+                os.path.join(yolov5_dir, "train.py"),
+                "--data", data_yaml,
+                "--weights", model_path,
+                "--epochs", str(self.epochs.get()),
+                "--img", str(self.imgsz.get()),
+                "--batch", str(self.batch.get()),
+                "--device", device_arg,
+                "--project", self.train_dataset.get(),
+                "--name", "runs/detect/train",
+                "--exist-ok"
+            ]
+        else:
+            cmd = [
+                "yolo", "train",
+                f"data={data_yaml}",
+                f"model={model_path}",
+                f"epochs={self.epochs.get()}",
+                f"imgsz={self.imgsz.get()}",
+                f"batch={self.batch.get()}",
+                f"device={device_arg}",
+                f"project={self.train_dataset.get()}",
+                "name=runs/detect/train",
+                "exist_ok=True"
+            ]
 
         self.train_output.delete('1.0', tk.END)
         self.train_output.insert('1.0', f"🚀 开始训练...\n")
@@ -951,11 +1304,11 @@ names:
 
                 # 正则表达式匹配训练进度
                 epoch_pattern = re.compile(r'Epoch\s+(\d+)/(\d+)')
+                loss_pattern = re.compile(r'loss\s*[=:]\s*([\d.]+)')
                 total_epochs = int(self.epochs.get())
 
                 for line in process.stdout:
                     try:
-                        # 尝试多种编码解码
                         try:
                             decoded_line = line.decode('utf-8', errors='ignore')
                         except:
@@ -964,25 +1317,21 @@ names:
                             except:
                                 decoded_line = line.decode('latin-1', errors='ignore')
 
-                        # 移除ANSI转义序列
                         clean_line = ansi_escape.sub('', decoded_line)
 
                         if clean_line.strip():
                             self.root.after(0, self.append_train_output, clean_line)
 
-                            # 解析进度 - 更新当前训练轮次/总训练轮次
                             epoch_match = epoch_pattern.search(clean_line)
                             if epoch_match:
                                 current_epoch = int(epoch_match.group(1))
                                 self.root.after(0, self.update_epoch_info,
                                                 f"当前训练: {current_epoch}/{total_epochs} 轮次")
 
-                            # 解析损失
-                            if 'cls_loss' in clean_line:
-                                parts = clean_line.strip().split()
-                                if len(parts) >= 8:
-                                    loss_info = f"box: {parts[3]}, cls: {parts[4]}, dfl: {parts[5]}"
-                                    self.root.after(0, self.loss_info.set, loss_info)
+                            loss_match = loss_pattern.search(clean_line)
+                            if loss_match:
+                                loss_val = loss_match.group(1)
+                                self.root.after(0, self.loss_info.set, f"loss: {loss_val}")
 
                     except Exception as e:
                         pass  # 忽略解析错误
@@ -1227,18 +1576,21 @@ names:
         # 获取数据集根目录（从训练选项卡获取）
         dataset_root = self.train_dataset.get()
 
-        # 构建测试命令 - 使用yolo命令格式
+        # 获取yolov5目录（默认在桌面）
+        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+
+        # 构建测试命令 - 使用yolov5 detect.py
+        output_dir = os.path.join(yolov5_dir, "runs", "detect", "predict")
         cmd = [
-            "yolo",
-            "predict",
-            f"model={self.test_model.get()}",
-            f"source={self.test_source.get()}",
-            f"conf={self.test_conf.get()}",
-            f"iou={self.test_iou.get()}",
-            f"project={dataset_root}",
-            "name=runs/detect/predict",
-            "exist_ok=True",
-            "save=True"
+            "python",
+            os.path.join(yolov5_dir, "detect.py"),
+            "--weights", self.test_model.get(),
+            "--source", self.test_source.get(),
+            "--conf", self.test_conf.get(),
+            "--iou", self.test_iou.get(),
+            "--project", yolov5_dir,
+            "--name", "runs/detect/predict",
+            "--exist-ok"
         ]
 
         self.test_output.delete('1.0', tk.END)
@@ -1256,13 +1608,18 @@ names:
                 import re
                 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+                # 将命令列表转换为字符串，使用shell=True执行conda run
+                cmd_str = ' '.join(cmd)
+
                 process = subprocess.Popen(
-                    cmd,
+                    cmd_str,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     universal_newlines=False,
                     bufsize=1,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    shell=True,
+                    cwd=os.getcwd()
                 )
                 self.test_process = process
 
@@ -1321,9 +1678,9 @@ names:
         if success:
             self.append_test_output("\n✅ 测试完成！\n")
 
-            # 查找最新的预测结果（在数据集目录的runs/detect/下）
-            dataset_root = self.train_dataset.get()
-            detect_dir = os.path.join(dataset_root, 'runs', 'detect')
+            # 查找最新的预测结果（在yolov5目录的runs/detect/下）
+            yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+            detect_dir = os.path.join(yolov5_dir, 'runs', 'detect')
 
             if os.path.exists(detect_dir):
                 # 获取所有predict目录
