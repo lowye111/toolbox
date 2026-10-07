@@ -35,6 +35,8 @@ class YOLODataPrepApp:
         self.has_gpu = self.check_gpu()
         self.last_train_result = None
         self.last_model_path = None
+        self.last_train_model_name = None
+        self.last_test_detect_dir = None
         self.train_process = None
         self.test_process = None
         self.preview_images = []
@@ -166,7 +168,8 @@ class YOLODataPrepApp:
         self.oneclick_model = tk.StringVar(value="yolov5s.pt")
         ttk.Combobox(params_row1, textvariable=self.oneclick_model,
                      values=["yolov5n.pt", "yolov5s.pt", "yolov5m.pt", "yolov5l.pt", "yolov5x.pt",
-                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt"],
+                             "yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"],
                      width=12).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(params_row1, text="图片尺寸:").pack(side=tk.LEFT, padx=(20, 0))
@@ -1163,7 +1166,8 @@ names:
         self.model = tk.StringVar(value="yolov5s.pt")
         ttk.Combobox(row6, textvariable=self.model,
                      values=["yolov5n.pt", "yolov5s.pt", "yolov5m.pt", "yolov5l.pt", "yolov5x.pt",
-                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt"],
+                             "yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+                             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"],
                      width=15).pack(side=tk.LEFT)
 
         # 进度显示 - 改为文本显示
@@ -1266,6 +1270,7 @@ names:
         device_arg = "0" if self.device.get() == "gpu" else "cpu"
 
         model_name = self.model.get()
+        self.last_train_model_name = model_name
         model_path = os.path.join(self.train_dataset.get(), model_name)
         if not os.path.exists(model_path):
             model_path = os.path.join(self.current_dir, model_name)
@@ -1586,6 +1591,20 @@ names:
         if directory:
             self.test_source.set(directory)
 
+    def is_yolov5_model_for_test(self):
+        """判断测试模型走哪条推理路径：True=yolov5 仓库 detect.py，False=ultralytics yolo predict"""
+        test_path = self.test_model.get()
+        name = os.path.basename(test_path).lower()
+        if name.startswith("yolov5"):
+            return True
+        if name.startswith(("yolov8", "yolo11")):
+            return False
+        # best.pt 等不明文件名：若来自本次训练，沿用训练时选的模型系列
+        if (self.last_train_model_name and self.last_model_path
+                and os.path.normpath(test_path) == os.path.normpath(self.last_model_path)):
+            return self.last_train_model_name.lower().startswith("yolov5")
+        return True  # 未知来源保持原有行为
+
     def start_test(self):
         """开始测试"""
         if not self.test_model.get():
@@ -1606,27 +1625,39 @@ names:
         # 获取数据集根目录（从训练选项卡获取）
         dataset_root = self.train_dataset.get()
 
-        # 自动检测 yolov5 目录（可用 config.json 的 yolov5_dir 指定）
-        yolov5_dir = find_yolov5_dir()
-        if not yolov5_dir:
-            messagebox.showerror("错误",
-                "测试功能依赖 yolov5 仓库中的 detect.py。\n"
-                "未找到 yolov5 目录，请在 config.json 的 yolov5_dir 中填写路径。")
-            return
-
-        # 构建测试命令 - 使用yolov5 detect.py
-        output_dir = os.path.join(yolov5_dir, "runs", "detect", "predict")
-        cmd = [
-            "python",
-            os.path.join(yolov5_dir, "detect.py"),
-            "--weights", self.test_model.get(),
-            "--source", self.test_source.get(),
-            "--conf", self.test_conf.get(),
-            "--iou", self.test_iou.get(),
-            "--project", yolov5_dir,
-            "--name", "runs/detect/predict",
-            "--exist-ok"
-        ]
+        if self.is_yolov5_model_for_test():
+            # yolov5 系列：使用 yolov5 仓库的 detect.py（自动检测目录，可用 config.json 的 yolov5_dir 指定）
+            yolov5_dir = find_yolov5_dir()
+            if not yolov5_dir:
+                messagebox.showerror("错误",
+                    "测试 yolov5 系列模型依赖 yolov5 仓库中的 detect.py。\n"
+                    "未找到 yolov5 目录，请在 config.json 的 yolov5_dir 中填写路径。")
+                return
+            self.last_test_detect_dir = os.path.join(yolov5_dir, "runs", "detect")
+            cmd = [
+                "python",
+                os.path.join(yolov5_dir, "detect.py"),
+                "--weights", self.test_model.get(),
+                "--source", self.test_source.get(),
+                "--conf", self.test_conf.get(),
+                "--iou", self.test_iou.get(),
+                "--project", yolov5_dir,
+                "--name", "runs/detect/predict",
+                "--exist-ok"
+            ]
+        else:
+            # yolov8 / yolo11 系列：使用 ultralytics 的 yolo predict
+            self.last_test_detect_dir = os.path.join(self.train_dataset.get(), "runs", "detect")
+            cmd = [
+                "yolo", "predict",
+                f"model={self.test_model.get()}",
+                f"source={self.test_source.get()}",
+                f"conf={self.test_conf.get()}",
+                f"iou={self.test_iou.get()}",
+                f"project={self.train_dataset.get()}",
+                "name=runs/detect/predict",
+                "exist_ok=True"
+            ]
 
         self.test_output.delete('1.0', tk.END)
         self.test_output.insert('1.0', f"🔍 开始测试...\n")
@@ -1713,12 +1744,11 @@ names:
         if success:
             self.append_test_output("\n✅ 测试完成！\n")
 
-            # 查找最新的预测结果（在yolov5目录的runs/detect/下）
-            yolov5_dir = find_yolov5_dir()
-            if not yolov5_dir:
-                self.append_test_output("⚠️ 未找到 yolov5 目录，无法定位预测结果\n")
+            # 查找最新的预测结果
+            detect_dir = self.last_test_detect_dir
+            if not detect_dir:
+                self.append_test_output("⚠️ 未记录测试输出目录，无法定位预测结果\n")
                 return
-            detect_dir = os.path.join(yolov5_dir, 'runs', 'detect')
 
             if os.path.exists(detect_dir):
                 # 获取所有predict目录

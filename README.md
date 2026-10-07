@@ -78,7 +78,7 @@ my toolbox for yolo learner
 - 特点：
   - 自动检测 conda 训练环境（默认名 yolov5，可在 config.json 修改）
   - 自动查找 yolov5 仓库目录（可在 config.json 的 yolov5_dir 指定）
-  - 适合训练 YOLO 系列模型
+  - 支持 YOLOv5 / YOLOv8 / YOLO11 系列模型（v5 需 yolov5 仓库，v8/v11 需 ultralytics）
 
 ## 注意事项
 
