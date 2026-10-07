@@ -6,6 +6,23 @@ my toolbox for yolo learner
 
 ## 启动方式
 双击「启动工具.bat」打开工具菜单，点击相应按钮启动对应工具。
+首次启动时会自动检测运行依赖，缺少时会提示一键安装。
+
+## 环境要求
+
+- Windows + Python 3.8 及以上（安装时勾选 “Add Python to PATH”）
+- 基础依赖见 requirements.txt；菜单启动时会自动自检，缺失可一键安装
+- 模型训练工具的训练功能额外需要：
+  - conda 训练环境（默认名 `yolov5`，需已安装 ultralytics/torch），或使用装好 ultralytics 的系统 Python
+  - 使用 yolov5 系列模型时需提供 yolov5 仓库目录（会自动在桌面、用户目录查找）
+
+换电脑后若自动检测不到，可编辑根目录 `config.json`（首次运行自动生成，不纳入 git）：
+
+| 配置项 | 说明 |
+| --- | --- |
+| conda_env | 训练环境名（默认 yolov5） |
+| env_python | 直接指定训练环境的 python.exe 路径（优先级最高） |
+| yolov5_dir | yolov5 仓库目录 |
 
 ## 工具列表
 
@@ -59,11 +76,12 @@ my toolbox for yolo learner
 - 图标：🤖
 - 功能：训练机器学习模型
 - 特点：
-  - 自动激活 YOLO 环境（yolov5）
+  - 自动检测 conda 训练环境（默认名 yolov5，可在 config.json 修改）
+  - 自动查找 yolov5 仓库目录（可在 config.json 的 yolov5_dir 指定）
   - 适合训练 YOLO 系列模型
 
 ## 注意事项
 
-- 模型训练工具需要 YOLO 环境支持（yolov5）
+- 模型训练工具需要 YOLO 训练环境支持（自动检测，可用 config.json 指定）
 - 点击「保存」才会真正写入文件
 - 关闭工具菜单不会影响已启动的工具窗口

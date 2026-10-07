@@ -1,0 +1,10 @@
+# 基础依赖（工具菜单与各 GUI 工具使用）
+# 首次运行「启动工具.bat」时会自动检测，缺少时可一键安装；也可手动执行:
+#   pip install -r requirements.txt
+opencv-python
+numpy
+Pillow
+
+# 模型训练工具的训练功能还需（体积较大，按需安装）：
+#   pip install ultralytics     # 使用 yolo11 / yolov8 系列训练
+#   或下载 yolov5 官方仓库       # 使用 yolov5 系列训练，目录填到 config.json 的 yolov5_dir

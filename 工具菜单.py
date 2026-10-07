@@ -4,10 +4,13 @@ import subprocess
 import sys
 import os
 
+import env_check
+
 
 class ToolMenuApp:
     def __init__(self, root):
         self.root = root
+        self.root_dir = os.path.dirname(os.path.abspath(__file__))
         self.root.title("工具菜单")
         self.root.geometry("600x450")
         self.root.minsize(400, 300)
@@ -20,6 +23,7 @@ class ToolMenuApp:
 
         self.setup_styles()
         self.create_widgets()
+        self.check_environment()
 
     def setup_styles(self):
         style = ttk.Style()
@@ -66,16 +70,16 @@ class ToolMenuApp:
 
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
 
-        tools = [
-            {"name": "参数扫描工具", "description": "批量查看、编辑、管理代码参数", "file": "tools/param_scanner_gui.py", "icon": "⚙️", "env": None},
-            {"name": "文件批量重命名", "description": "批量重命名文件，支持多种命名规则", "file": "tools/change_name.py", "icon": "🔄", "env": None},
-            {"name": "视频抽帧工具", "description": "从视频中提取帧图片", "file": "tools/frame_extract.py", "icon": "🎬", "env": None},
-            {"name": "图片转RGB565", "description": "将图片转换为RGB565的C数组（STM32屏幕显示）", "file": "tools/img2rgb565_gui.py", "icon": "🖼️", "env": None},
-            {"name": "进度条标定尺", "description": "透明进度条标定工具", "file": "tools/ruler.py", "icon": "📏", "env": None},
-            {"name": "模型训练工具", "description": "训练机器学习模型（自动激活YOLO环境）", "file": "tools/model_train.py", "icon": "🤖", "env": "yolov5"}
+        self.tools = [
+            {"name": "参数扫描工具", "description": "批量查看、编辑、管理代码参数", "file": "tools/param_scanner_gui.py", "icon": "⚙️"},
+            {"name": "文件批量重命名", "description": "批量重命名文件，支持多种命名规则", "file": "tools/change_name.py", "icon": "🔄"},
+            {"name": "视频抽帧工具", "description": "从视频中提取帧图片", "file": "tools/frame_extract.py", "icon": "🎬", "deps": ["cv2"]},
+            {"name": "图片转RGB565", "description": "将图片转换为RGB565的C数组（STM32屏幕显示）", "file": "tools/img2rgb565_gui.py", "icon": "🖼️", "deps": ["PIL"]},
+            {"name": "进度条标定尺", "description": "透明进度条标定工具", "file": "tools/ruler.py", "icon": "📏"},
+            {"name": "模型训练工具", "description": "训练机器学习模型（自动检测YOLO训练环境）", "file": "tools/model_train.py", "icon": "🤖", "deps": ["cv2", "numpy", "PIL"], "env": True},
         ]
 
-        for tool in tools:
+        for tool in self.tools:
             tool_frame = ttk.Frame(self.scrollable_frame)
             tool_frame.pack(fill=tk.X, pady=8)
 
@@ -101,35 +105,82 @@ class ToolMenuApp:
     def on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    def check_environment(self):
+        """启动时自检所有工具的基础依赖"""
+        deps = sorted({d for tool in self.tools for d in tool.get('deps', [])})
+        if deps:
+            env_check.ensure_modules(deps, title="环境自检", parent=self.root)
+
     def launch_tool(self, tool):
         try:
             filename = tool['file']
-            env = tool.get('env')
-            script_path = os.path.join(os.getcwd(), filename)
-            
+            deps = tool.get('deps', [])
+            script_path = os.path.join(self.root_dir, filename)
+
             if not os.path.exists(script_path):
                 messagebox.showerror("错误", f"找不到文件: {filename}")
                 return
 
-            if env == "yolo":
-                bat_content = f'''@echo off
-chcp 65001 >nul
-cd /d "{os.getcwd()}"
-call conda activate yolo
-python "{script_path}"
-pause
-'''
-                bat_path = os.path.join(os.getcwd(), "run_yolo_temp.bat")
-                with open(bat_path, 'w', encoding='utf-8') as f:
-                    f.write(bat_content)
-                subprocess.Popen([bat_path], shell=True)
-                messagebox.showinfo("启动成功", f"正在启动 {filename}（YOLO环境）")
-            else:
-                subprocess.Popen([sys.executable, script_path])
-                messagebox.showinfo("启动成功", f"正在启动 {filename}")
-        
+            if tool.get('env'):
+                self.launch_with_env(tool, script_path, deps)
+                return
+
+            if deps and not env_check.ensure_modules(deps, parent=self.root):
+                return
+
+            subprocess.Popen([sys.executable, script_path])
+            messagebox.showinfo("启动成功", f"正在启动 {filename}")
+
         except Exception as e:
-            messagebox.showerror("启动失败", f"启动 {filename} 时出错:\n{str(e)}")
+            messagebox.showerror("启动失败", f"启动 {tool.get('file')} 时出错:\n{str(e)}")
+
+    def launch_with_env(self, tool, script_path, deps):
+        """启动需要 conda 训练环境的工具：自动检测环境、补齐依赖后启动"""
+        env_python = env_check.find_env_python()
+        if not env_python:
+            if env_check.module_available("ultralytics") or env_check.module_available("torch"):
+                # 当前 Python 本身具备训练能力（如 miniconda base 环境），直接使用
+                env_python = sys.executable
+            else:
+                if not messagebox.askyesno(
+                        "未检测到训练环境",
+                        "未检测到 conda 训练环境，当前 Python 也没有训练依赖（ultralytics/torch）。\n\n"
+                        "可先安装/创建环境，或在根目录 config.json 中填写：\n"
+                        "  conda_env  —— 环境名（默认 yolov5）\n"
+                        "  env_python —— 环境的 python.exe 路径\n\n"
+                        "是否仍用当前 Python 启动？"):
+                    return
+                env_python = sys.executable
+
+        if env_python == sys.executable:
+            # 未检测到专用环境，退回当前 Python（需补齐基础依赖）
+            if deps and not env_check.ensure_modules(deps, parent=self.root):
+                return
+            env_name = "当前 Python"
+        else:
+            env_name = os.path.basename(os.path.dirname(env_python))
+            missing = env_check.env_missing_modules(env_python, deps) if deps else None
+            if missing:
+                pkgs = env_check.pip_names(missing)
+                if messagebox.askyesno(
+                        "训练环境缺少依赖",
+                        f"环境「{env_name}」中缺少：\n\n" + "\n".join(pkgs) +
+                        "\n\n是否安装到该环境？（安装完成后重新启动工具）",
+                        parent=self.root):
+                    env_check.install_in_console(pkgs, env_python)
+                return
+
+        # 等效于 conda activate：把环境目录加入 PATH，保证工具内调用的 python / yolo 来自该环境
+        env = os.environ.copy()
+        env_dir = os.path.dirname(env_python)
+        env["PATH"] = os.pathsep.join([
+            env_dir,
+            os.path.join(env_dir, "Scripts"),
+            os.path.join(env_dir, "Library", "bin"),
+            env.get("PATH", ""),
+        ])
+        subprocess.Popen([env_python, script_path], env=env)
+        messagebox.showinfo("启动成功", f"正在启动 {tool['file']}（环境：{env_name}）")
 
 
 if __name__ == "__main__":

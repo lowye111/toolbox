@@ -11,6 +11,18 @@ import subprocess
 import threading
 from datetime import datetime
 from PIL import Image, ImageTk
+import sys
+
+# 引入根目录的环境检测模块（自动检测 conda 训练环境、yolov5 目录）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from env_check import find_env_python, find_yolov5_dir
+except Exception:
+    def find_env_python():
+        return None
+
+    def find_yolov5_dir():
+        return None
 
 
 class YOLODataPrepApp:
@@ -28,6 +40,9 @@ class YOLODataPrepApp:
         self.preview_images = []
         self.current_preview_index = 0
         self.current_dir = os.path.dirname(os.path.abspath(__file__))  # 获取当前脚本所在目录
+
+        # 自动检测训练环境 Python（仅作为界面默认值；实际环境激活由工具菜单负责）
+        self.detected_python = find_env_python() or ""
 
         # 设置样式
         self.setup_styles()
@@ -339,12 +354,18 @@ class YOLODataPrepApp:
 
     def start_oneclick_training(self, dataset_dir):
         """开始一键训练"""
-        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+        yolov5_dir = find_yolov5_dir()
         data_yaml = os.path.join(dataset_dir, 'data.yaml')
         model_name = self.oneclick_model.get()
         device_arg = "0" if self.oneclick_device.get() == "gpu" else "cpu"
 
         if model_name.startswith("yolov5"):
+            if not yolov5_dir:
+                self.append_oneclick_output(
+                    "❌ 未找到 yolov5 仓库目录（缺少 train.py）\n"
+                    "   请在 config.json 的 yolov5_dir 中填写路径，或改用 yolo11 系列模型")
+                self.root.after(0, lambda: self.oneclick_finished(False))
+                return
             cmd = [
                 "python",
                 os.path.join(yolov5_dir, "train.py"),
@@ -1090,7 +1111,7 @@ names:
         row2 = ttk.Frame(basic_frame)
         row2.pack(fill=tk.X, pady=2)
         ttk.Label(row2, text="Python路径:", width=12).pack(side=tk.LEFT)
-        self.python_path = tk.StringVar(value=r"C:\Users\84820\anaconda3\envs\yolov11\python.exe")
+        self.python_path = tk.StringVar(value=self.detected_python)
         ttk.Entry(row2, textvariable=self.python_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(row2, text="📁", command=self.browse_python, width=3).pack(side=tk.RIGHT)
 
@@ -1214,14 +1235,17 @@ names:
 
     def update_train_preview(self):
         """更新训练命令预览"""
-        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+        yolov5_dir = find_yolov5_dir()
         data_yaml = os.path.join(self.train_dataset.get(), 'data.yaml')
         device_arg = "0" if self.device.get() == "gpu" else "cpu"
         model_name = self.model.get()
 
         # 根据模型类型选择不同的命令格式
         if model_name.startswith("yolov5"):
-            cmd = f"python {yolov5_dir}/train.py --data {data_yaml} --weights {model_name} --epochs {self.epochs.get()} --img {self.imgsz.get()} --batch {self.batch.get()} --device {device_arg} --project {self.train_dataset.get()} --name runs/detect/train --exist-ok"
+            if yolov5_dir:
+                cmd = f"python {yolov5_dir}/train.py --data {data_yaml} --weights {model_name} --epochs {self.epochs.get()} --img {self.imgsz.get()} --batch {self.batch.get()} --device {device_arg} --project {self.train_dataset.get()} --name runs/detect/train --exist-ok"
+            else:
+                cmd = "⚠️ 未找到 yolov5 目录：请在 config.json 的 yolov5_dir 中填写，或改用 yolo11 系列模型"
         else:
             cmd = f"yolo train data={data_yaml} model={model_name} epochs={self.epochs.get()} imgsz={self.imgsz.get()} batch={self.batch.get()} device={device_arg} project={self.train_dataset.get()} name=runs/detect/train exist_ok=True"
 
@@ -1230,7 +1254,7 @@ names:
 
     def start_training(self):
         """开始训练（改进版）- 显示当前训练轮次/总训练轮次"""
-        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+        yolov5_dir = find_yolov5_dir()
         data_yaml = os.path.join(self.train_dataset.get(), 'data.yaml')
         if not os.path.exists(data_yaml):
             messagebox.showerror("错误", f"data.yaml 不存在: {data_yaml}\n请先在配置向导中创建")
@@ -1248,6 +1272,12 @@ names:
             if not os.path.exists(model_path):
                 model_path = model_name
                 self.append_train_output(f"⚠️ 未找到本地模型文件 {model_name}，将自动下载\n")
+
+        if model_name.startswith("yolov5") and not yolov5_dir:
+            messagebox.showerror("错误",
+                "未找到 yolov5 仓库目录（缺少 train.py）。\n"
+                "请在 config.json 的 yolov5_dir 中填写路径，或改用 yolo11 系列模型。")
+            return
 
         # 根据模型类型构建不同的命令
         if model_name.startswith("yolov5"):
@@ -1576,8 +1606,13 @@ names:
         # 获取数据集根目录（从训练选项卡获取）
         dataset_root = self.train_dataset.get()
 
-        # 获取yolov5目录（默认在桌面）
-        yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+        # 自动检测 yolov5 目录（可用 config.json 的 yolov5_dir 指定）
+        yolov5_dir = find_yolov5_dir()
+        if not yolov5_dir:
+            messagebox.showerror("错误",
+                "测试功能依赖 yolov5 仓库中的 detect.py。\n"
+                "未找到 yolov5 目录，请在 config.json 的 yolov5_dir 中填写路径。")
+            return
 
         # 构建测试命令 - 使用yolov5 detect.py
         output_dir = os.path.join(yolov5_dir, "runs", "detect", "predict")
@@ -1679,7 +1714,10 @@ names:
             self.append_test_output("\n✅ 测试完成！\n")
 
             # 查找最新的预测结果（在yolov5目录的runs/detect/下）
-            yolov5_dir = r"C:\Users\ok\Desktop\yolov5-7.0"
+            yolov5_dir = find_yolov5_dir()
+            if not yolov5_dir:
+                self.append_test_output("⚠️ 未找到 yolov5 目录，无法定位预测结果\n")
+                return
             detect_dir = os.path.join(yolov5_dir, 'runs', 'detect')
 
             if os.path.exists(detect_dir):
