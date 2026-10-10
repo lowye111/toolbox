@@ -975,7 +975,8 @@ class App(tk.Tk):
     # ==================== AI 识别 ====================
 
     def ai_scan_all(self):
-        api_key, model = get_ai_settings()
+        """打开选择窗口，选择要 AI 识别的文件"""
+        api_key, _ = get_ai_settings()
         if not api_key:
             ensure_key_field()
             messagebox.showinfo(
@@ -989,7 +990,79 @@ class App(tk.Tk):
         if not files:
             messagebox.showinfo("提示", "请先选择文件夹（没有扫描到含参数的文件）")
             return
+        self._open_ai_select_dialog(files)
 
+    def _open_ai_select_dialog(self, files):
+        """弹出文件选择窗口：多选要 AI 识别的文件（默认选中当前文件）"""
+        dlg = tk.Toplevel(self)
+        dlg.title("AI 识别 - 选择文件")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.update_idletasks()
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
+        tk.Label(dlg, text=f"共 {len(files)} 个含参数的文件（Ctrl/Shift 多选，双击=只识别该文件）：",
+                 anchor="w").pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        body = tk.Frame(dlg)
+        body.pack(fill=tk.BOTH, expand=True, padx=10)
+        self._ai_lb = tk.Listbox(body, selectmode=tk.EXTENDED, width=64, height=18,
+                                 activestyle="none", exportselection=False)
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._ai_lb.yview)
+        self._ai_lb.configure(yscrollcommand=sb.set)
+        self._ai_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._ai_dlg_files = list(files)
+        for fp in files:
+            self._ai_lb.insert(tk.END, f"{os.path.basename(fp)}   ({len(self.param_map[fp])} 个候选)")
+        # 默认选中当前正在看的文件
+        if self.current_file in files:
+            idx = files.index(self.current_file)
+            self._ai_lb.selection_set(idx)
+            self._ai_lb.see(idx)
+
+        btns = tk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=10, pady=8)
+        tk.Button(btns, text="▶ 识别选中", width=12, command=self._ai_dialog_start_selected).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="识别全部", width=10, command=self._ai_dialog_start_all).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="取消", width=8, command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+
+        self._ai_dlg = dlg
+        self._ai_lb.bind("<Double-Button-1>", self._ai_dialog_start_one)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.update_idletasks()
+        dlg.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 60}")
+        dlg.focus_set()
+
+    def _ai_dialog_start_selected(self):
+        sel = list(self._ai_lb.curselection())
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要识别的文件（Ctrl/Shift 可多选）", parent=self._ai_dlg)
+            return
+        files = [self._ai_dlg_files[i] for i in sel]
+        self._ai_dlg.destroy()
+        self._start_ai(files)
+
+    def _ai_dialog_start_all(self):
+        files = list(self._ai_dlg_files)
+        self._ai_dlg.destroy()
+        self._start_ai(files)
+
+    def _ai_dialog_start_one(self, event):
+        idx = self._ai_lb.nearest(event.y)
+        if idx < 0:
+            return
+        fp = self._ai_dlg_files[idx]
+        self._ai_dlg.destroy()
+        self._start_ai([fp])
+
+    def _start_ai(self, files):
+        """开始 AI 识别指定文件（后台线程 + 队列回传进度）"""
+        api_key, model = get_ai_settings()
         self.btn_ai.config(state=tk.DISABLED)
         self.ai_progress.config(maximum=len(files), value=0)
         self.ai_status_var.set(f"AI 识别准备中（共 {len(files)} 个文件）...")
