@@ -489,19 +489,20 @@ class App(tk.Tk):
             anchor="w")
         self.info_label.pack(fill=tk.X, padx=5, pady=(4, 0))
 
-        # 文件标签栏（横向滚动条 + 滚轮滚动 + 每个文件可关闭）
+        # 文件标签栏（多行自动换行 + 垂直滚动 + 每个文件可关闭）
+        # 不用单行横向滚动：文件很多时单行总宽度会超过 Tk 坐标上限（约32767像素），后端会截断显示
         tab_frame = tk.Frame(self, bg="#eee")
         tab_frame.pack(fill=tk.X, padx=5)
         self.tab_canvas = tk.Canvas(tab_frame, bg="#eee", height=34, highlightthickness=0)
-        self.tab_scroll = ttk.Scrollbar(tab_frame, orient=tk.HORIZONTAL, command=self.tab_canvas.xview)
-        self.tab_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.tab_canvas.pack(side=tk.TOP, fill=tk.X)
-        self.tab_canvas.configure(xscrollcommand=self.tab_scroll.set)
+        self.tab_scroll = ttk.Scrollbar(tab_frame, orient=tk.VERTICAL, command=self.tab_canvas.yview)
+        self.tab_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tab_canvas.configure(yscrollcommand=self.tab_scroll.set)
         self.tab_inner = tk.Frame(self.tab_canvas, bg="#eee")
-        self.tab_canvas.create_window((0, 0), window=self.tab_inner, anchor="nw")
-        self.tab_inner.bind("<Configure>",
-                            lambda e: self.tab_canvas.configure(scrollregion=self.tab_canvas.bbox("all")))
+        self._tab_win = self.tab_canvas.create_window((0, 0), window=self.tab_inner, anchor="nw")
         self.tab_canvas.bind("<MouseWheel>", self._tab_wheel)
+        self.tab_canvas.bind("<Configure>", self._on_tab_resize)
+        self.tab_widgets = {}  # 文件路径 -> 标签控件
 
         # 双栏面板
         paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6)
@@ -573,19 +574,25 @@ class App(tk.Tk):
             self.switch_file(self.all_files[0])
 
     def _tab_wheel(self, event):
-        """标签栏横向滚动"""
-        self.tab_canvas.xview_scroll(int(-event.delta / 120) * 3, "units")
+        """标签栏滚动"""
+        self.tab_canvas.yview_scroll(int(-event.delta / 120) * 2, "units")
         return "break"
 
+    def _on_tab_resize(self, event):
+        """标签栏宽度变化时重新排版"""
+        if abs(event.width - getattr(self, "_tab_layout_width", 0)) > 40:
+            self._layout_tabs()
+
     def rebuild_tabs(self):
+        """重新创建全部文件标签（选文件夹时调用）"""
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
-        # 添加文件标签（右上角 × 可关闭）
+        self.tab_widgets = {}
+        # 创建文件标签（右上角 × 可关闭）
         for fp in self.all_files:
             fn = os.path.basename(fp)
             holder = tk.Frame(self.tab_inner, bg="#eee")
-            holder.pack(side=tk.LEFT, padx=2, pady=1)
             btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
                             command=lambda p=fp: self.switch_file(p))
             btn.pack()
@@ -597,8 +604,39 @@ class App(tk.Tk):
             close.bind("<Leave>", lambda e, w=close: w.config(fg="#999999"))
             for w in (holder, btn, close):
                 w.bind("<MouseWheel>", self._tab_wheel)
-        # 更新滚动范围
-        self.tab_canvas.configure(scrollregion=self.tab_canvas.bbox("all"))
+            self.tab_widgets[fp] = holder
+        self._layout_tabs(reset_scroll=True)
+
+    def _layout_tabs(self, reset_scroll=False):
+        """把文件标签按容器宽度排成多行，高度超出部分垂直滚动（不重建控件，速度快）"""
+        canvas_w = self.tab_canvas.winfo_width()
+        if canvas_w < 50:
+            canvas_w = 900  # 窗口尚未显示时的兜底宽度
+        self.tab_inner.update_idletasks()
+
+        cur_x = row_y = row_h = 0
+        total_h = 0
+        for fp in self.all_files:
+            holder = self.tab_widgets.get(fp)
+            if holder is None:
+                continue
+            w = holder.winfo_reqwidth()
+            h = holder.winfo_reqheight()
+            if cur_x > 0 and cur_x + w > canvas_w - 4:
+                row_y += row_h + 4
+                cur_x = row_h = 0
+            holder.place(x=cur_x, y=row_y)
+            cur_x += w + 6
+            row_h = max(row_h, h)
+            total_h = row_y + row_h
+
+        total_h = max(total_h, 30)
+        self.tab_canvas.itemconfigure(self._tab_win, width=canvas_w, height=total_h)
+        self.tab_canvas.configure(scrollregion=(0, 0, canvas_w, total_h))
+        self.tab_canvas.configure(height=min(total_h, 96))
+        self._tab_layout_width = canvas_w
+        if reset_scroll:
+            self.tab_canvas.yview_moveto(0)
 
     def close_file_tab(self, fp):
         """关闭文件标签：仅从当前列表移除，不改动磁盘文件"""
@@ -615,7 +653,11 @@ class App(tk.Tk):
                 self.btn_apply.config(state=tk.DISABLED)
                 self.btn_save.config(state=tk.DISABLED)
                 self.refresh_tables()
-        self.rebuild_tabs()
+        # 只销毁被关闭的标签控件，不重建全部（避免文件多时卡顿）
+        holder = self.tab_widgets.pop(fp, None)
+        if holder:
+            holder.destroy()
+        self._layout_tabs()
 
     def switch_file(self, fp):
         self.current_file = fp
