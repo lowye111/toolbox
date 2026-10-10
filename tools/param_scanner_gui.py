@@ -1,10 +1,24 @@
 import os
 import re
+import sys
+import json
+import threading
+import urllib.request
+import urllib.error
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 
-VERSION = "极简稳定版 - 单冒号参数必显示"
+# 引入根目录的环境检测模块（复用 config.json）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import env_check
+except Exception:
+    env_check = None
+
+VERSION = "AI 识别版"
+
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 # 强化匹配规则，确保单冒号参数不遗漏
 PATTERNS = {
@@ -22,16 +36,33 @@ EXCLUDE_PATTERNS = [
     re.compile(r'\b(P|K|Q|R|X|result)\s*='),
 ]
 
+
+def read_file_lines(path):
+    """读取文件行：utf-8 优先，兼容 gbk（Windows 中文文件）"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.readlines()
+    except UnicodeDecodeError:
+        with open(path, 'r', encoding='gbk') as f:
+            return f.readlines()
+
+
+def make_param(path, line_num, type_name, name, value, original_line):
+    """构造统一结构的参数项"""
+    return {
+        "file_path": path, "file_name": os.path.basename(path),
+        "line": line_num, "type": type_name,
+        "name": name, "value": value, "original_line": original_line,
+        "new_value": None, "is_modified": False, "is_priority": False,
+        "hidden": False,
+        "ai_note": "", "ai_filtered": False, "ai_recommend": False,
+    }
+
+
 def scan_file(path):
     results = []
     try:
-        # 优先utf-8，兼容大部分文件
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-    except UnicodeDecodeError:
-        # 失败则用gbk，兼容Windows中文文件
-        with open(path, 'r', encoding='gbk') as f:
-            lines = f.readlines()
+        lines = read_file_lines(path)
     except Exception as e:
         print(f"读取文件失败：{path} - {e}")
         return results
@@ -47,11 +78,11 @@ def scan_file(path):
             line_num += 1
             continue
 
-        # ===================== 新增：跳过双冒号 :: =====================
+        # ===================== 跳过双冒号 :: =====================
         if "::" in line:
             line_num += 1
             continue
-        # ==============================================================
+        # =========================================================
 
         # 跳过enum块
         if 'enum' in stripped:
@@ -77,32 +108,20 @@ def scan_file(path):
             name = match.group(1).strip()
             value = match.group(2).rstrip(';').strip()
             if name and value and name != value:
-                results.append({
-                    "file_path": path, "file_name": os.path.basename(path),
-                    "line": line_num, "type": "变量",
-                    "name": name, "value": value, "original_line": line,
-                    "new_value": None, "is_modified": False, "is_priority": False,
-                    "hidden": False
-                })
+                results.append(make_param(path, line_num, "变量", name, value, line))
             line_num += 1
             continue
 
-        # ===================== 新增：匹配单冒号参数 =====================
+        # ===================== 匹配单冒号参数 =====================
         match = PATTERNS['colon_param'].search(line)
         if match:
             name = match.group(1).strip()
             value = match.group(2).strip()
             if name and value and name != value:
-                results.append({
-                    "file_path": path, "file_name": os.path.basename(path),
-                    "line": line_num, "type": "参数",
-                    "name": name, "value": value, "original_line": line,
-                    "new_value": None, "is_modified": False, "is_priority": False,
-                    "hidden": False
-                })
+                results.append(make_param(path, line_num, "参数", name, value, line))
             line_num += 1
             continue
-        # ==============================================================
+        # =========================================================
 
         # 匹配其他类型参数（= 格式）
         for typ, reg in PATTERNS.items():
@@ -111,25 +130,24 @@ def scan_file(path):
             match = reg.search(line)
             if not match:
                 continue
-            
+
             if typ == "macro_define":
                 name = match.group(1).strip()
                 value = match.group(2).strip()
                 type_name = "宏"
-            else:
+            elif typ == "global_const":
                 name = match.group(2).strip()
-                value = match.group(3).strip() if len(match.groups())>=3 else match.group(2).strip()
-                type_name = "常量" if typ == "global_const" else "全局变量"
-            
+                value = match.group(3).strip()
+                type_name = "常量"
+            else:
+                # global_var 只有两组：名称、值（原代码取错分组，导致顶层变量被漏掉）
+                name = match.group(1).strip()
+                value = match.group(2).strip()
+                type_name = "全局变量"
+
             value = value.rstrip(';').strip()
             if name and value and name != value:
-                results.append({
-                    "file_path": path, "file_name": os.path.basename(path),
-                    "line": line_num, "type": type_name,
-                    "name": name, "value": value, "original_line": line,
-                    "new_value": None, "is_modified": False, "is_priority": False,
-                    "hidden": False
-                })
+                results.append(make_param(path, line_num, type_name, name, value, line))
             break
 
         line_num += 1
@@ -137,6 +155,43 @@ def scan_file(path):
     # 打印扫描结果，方便调试（可删除）
     print(f"文件 {os.path.basename(path)} 扫描到 {len(results)} 个参数")
     return results
+
+
+def match_param_line(line):
+    """对单行尝试匹配参数，返回 (类型, 名称, 值) 或 None（用于核对 AI 补充发现的行）"""
+    if not line.strip():
+        return None
+    m = PATTERNS['macro_define'].search(line)
+    if m:
+        name, value = m.group(1).strip(), m.group(2).strip()
+        return ("宏", name, value) if name and value and name != value else None
+    m = PATTERNS['naked_param'].search(line)
+    if m:
+        name, value = m.group(1).strip(), m.group(2).rstrip(';').strip()
+        return ("变量", name, value) if name and value and name != value else None
+    m = PATTERNS['colon_param'].search(line)
+    if m:
+        name, value = m.group(1).strip(), m.group(2).strip()
+        return ("参数", name, value) if name and value and name != value else None
+    m = PATTERNS['global_const'].search(line)
+    if m:
+        name, value = m.group(2).strip(), m.group(3).strip()
+        if name and value and name != value:
+            return ("常量", name, value)
+    m = PATTERNS['global_var'].search(line)
+    if m:
+        name, value = m.group(1).strip(), m.group(2).strip()
+        if name and value and name != value:
+            return ("全局变量", name, value)
+    # 宽松兜底：处理 "static float kp = 1.2;" 这类多修饰词形式（仅用于核对 AI 补充发现）
+    m = (re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?!=)([^;{}]+?)\s*;?\s*$', line)
+         or re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?![=:])([^;{}]+?)\s*;?\s*$', line))
+    if m:
+        name, value = m.group(1).strip(), m.group(2).strip()
+        if name and value and name != value:
+            return ("变量", name, value)
+    return None
+
 
 def scan_folder(folder):
     exts = ('.h', '.hpp', '.c', '.cpp', '.cc', '.cxx')
@@ -157,18 +212,14 @@ def scan_folder(folder):
 
     return param_map, all_files
 
+
 def save_param(item, new_value):
     fp = item["file_path"]
     line_idx = item["line"] - 1
     name = item["name"]
-    old_val = item["value"]
 
     try:
-        with open(fp, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-    except UnicodeDecodeError:
-        with open(fp, 'r', encoding='gbk') as f:
-            lines = f.readlines()
+        lines = read_file_lines(fp)
     except Exception as e:
         messagebox.showerror("错误", f"读取文件失败：{e}")
         return False
@@ -179,12 +230,11 @@ def save_param(item, new_value):
 
     line = lines[line_idx]
 
-    # ===================== 新增：支持保存单冒号 =====================
+    # 支持保存单冒号
     if ":" in line:
         pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*:\s*)(.*?)(\s*;?\s*)$', re.DOTALL)
     else:
         pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*=\s*)(.*?)(\s*;?\s*)$', re.DOTALL)
-    # ==============================================================
 
     match = pattern.search(line)
     if not match:
@@ -204,6 +254,7 @@ def save_param(item, new_value):
         return False
 
     return True
+
 
 def generate_tune_log(param_map):
     modified = []
@@ -233,26 +284,206 @@ def generate_tune_log(param_map):
     except Exception as e:
         messagebox.showerror("错误", f"日志生成失败：{e}")
 
+
+# ==================== AI 识别（DeepSeek） ====================
+
+def get_ai_settings():
+    """从 config.json 读取 API Key 和模型名"""
+    key, model = "", "deepseek-flash"
+    if env_check:
+        cfg = env_check.load_config()
+        key = (cfg.get("deepseek_api_key") or "").strip()
+        model = (cfg.get("deepseek_model") or "deepseek-flash").strip()
+    return key, model
+
+
+def ensure_key_field():
+    """确保 config.json 磁盘文件里存在 deepseek 配置项，方便用户填写"""
+    if not env_check:
+        return
+    cfg = env_check.load_config()
+    try:
+        raw = json.loads(env_check.CONFIG_PATH.read_text(encoding="utf-8")) if env_check.CONFIG_PATH.exists() else {}
+    except Exception:
+        raw = {}
+    if not all(k in raw for k in ("deepseek_api_key", "deepseek_model")):
+        env_check.save_config(cfg)
+
+
+def _ssl_context():
+    """优先用 certifi 证书（requests 的证书包），失败则用系统默认"""
+    try:
+        import ssl
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def call_deepseek(file_text, candidates_text, api_key, model):
+    """调用 DeepSeek 分析文件，返回解析后的 JSON 字典"""
+    system_prompt = "你是嵌入式 C/C++ 代码参数分析助手，只输出 JSON，不要输出其它内容。"
+    user_prompt = f"""下面是一个源文件的全部内容（行号: 内容）：
+{file_text}
+
+正则预筛出的候选参数（行号: 参数名）：
+{candidates_text}
+
+请逐一判断每个候选行是否适合作为"可调参数"（tunable），按 JSON 返回：
+{{
+  "params": [
+    {{"line": 12, "name": "SPEED_KP", "tunable": true, "note": "速度环比例系数", "recommend": true}}
+  ]
+}}
+
+要求：
+1. tunable=false：函数体内的临时变量、循环变量、中间计算、外设寄存器/结构体成员赋值、状态机内部变量等不适合手动调节的；
+2. note：不超过 12 个字的中文用途说明（如"速度环比例系数"）；
+3. recommend：全文件最值得调节的参数，最多推荐 5 个；
+4. 只针对候选清单里的行；如果你发现清单漏掉了明显的可调参数，也可以补充返回；
+5. 严格输出 JSON。"""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        DEEPSEEK_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError("API Key 无效（401），请检查 config.json 里的 deepseek_api_key")
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"请求失败 HTTP {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"网络错误：{e.reason}")
+
+    content = body["choices"][0]["message"]["content"].strip()
+    if content.startswith("```"):
+        parts = content.split("```")
+        if len(parts) >= 3:
+            content = parts[1]
+            if content.lower().startswith("json"):
+                content = content[4:]
+        content = content.strip()
+    return json.loads(content)
+
+
+def build_numbered_text(lines, params, whole_file_limit=800, window=12):
+    """生成发给 AI 的文件文本：小文件发全文，大文件只发候选行附近的窗口"""
+    if len(lines) <= whole_file_limit:
+        return "\n".join(f"{i + 1}: {t.rstrip()}" for i, t in enumerate(lines))
+
+    cand_lines = sorted({p["line"] for p in params})
+    blocks = []
+    for ln in cand_lines:
+        start = max(1, ln - window)
+        end = min(len(lines), ln + window)
+        if blocks and start <= blocks[-1][1] + 1:
+            blocks[-1][1] = max(blocks[-1][1], end)
+        else:
+            blocks.append([start, end])
+
+    out = []
+    for idx, (s, e) in enumerate(blocks):
+        if idx:
+            out.append(f"... (省略 {blocks[idx - 1][1] + 1}~{s - 1} 行)")
+        out.extend(f"{i}: {lines[i - 1].rstrip()}" for i in range(s, e + 1))
+    return "\n".join(out)
+
+
+def apply_ai_result(params, ai_data, lines=None, path="", ):
+    """把 AI 结果合并进参数列表；返回 (过滤数, 补充数, 推荐数)"""
+    by_line = {p["line"]: p for p in params}
+    filtered = added = recommended = 0
+    for item in ai_data.get("params", []):
+        try:
+            line = int(item.get("line"))
+        except (TypeError, ValueError):
+            continue
+        note = str(item.get("note") or "").strip()
+        if line in by_line:
+            p = by_line[line]
+            p["ai_filtered"] = item.get("tunable") is False
+            if note:
+                p["ai_note"] = note
+            p["ai_recommend"] = bool(item.get("recommend"))
+            if p["ai_filtered"]:
+                filtered += 1
+            if p["ai_recommend"]:
+                recommended += 1
+        elif item.get("tunable") and lines and 1 <= line <= len(lines):
+            # AI 补充发现：与真实文件行核对后再加入，防止幻觉
+            matched = match_param_line(lines[line - 1])
+            if matched:
+                type_name, name, value = matched
+                new_p = make_param(path, line, type_name, name, value, lines[line - 1])
+                new_p["ai_note"] = note
+                new_p["ai_recommend"] = bool(item.get("recommend"))
+                params.append(new_p)
+                added += 1
+                if new_p["ai_recommend"]:
+                    recommended += 1
+    params.sort(key=lambda x: x["line"])
+    return filtered, added, recommended
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"参数编辑工具 {VERSION}")
-        self.geometry("1050x700")
+        self.geometry("1100x700")
         self.param_map = {}
         self.all_files = []
         self.current_file = ""
         self.last_folder = ""
         self.unsaved_tag = "unsaved"
+        self.ai_rec_tag = "ai_rec"
+        self.ai_filtered_tag = "ai_filtered"
+        self.item_map = {}  # (tree, item_id) -> 参数项
         self.selected_param = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # 顶部控件
         top_frame = tk.Frame(self)
         top_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.btn_select_folder = tk.Button(top_frame, text="选择文件夹", command=self.select_folder)
+
+        row1 = tk.Frame(top_frame)
+        row1.pack(fill=tk.X)
+        self.btn_select_folder = tk.Button(row1, text="选择文件夹", command=self.select_folder)
         self.btn_select_folder.pack(side=tk.LEFT, padx=5)
-        self.info_label = tk.Label(top_frame, text="未选择文件夹 | 支持 .h/.cpp/.c 等文件 | 单冒号=参数，双冒号=跳过")
-        self.info_label.pack(side=tk.LEFT, padx=10)
+        self.btn_ai = tk.Button(row1, text="🤖 AI 识别", command=self.ai_scan_all)
+        self.btn_ai.pack(side=tk.LEFT, padx=5)
+        self.btn_apply_rec = tk.Button(row1, text="📌 采用AI推荐", command=self.apply_ai_recommend)
+        self.btn_apply_rec.pack(side=tk.LEFT, padx=5)
+        self.show_filtered_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row1, text="显示AI过滤项", variable=self.show_filtered_var,
+                       command=self.refresh_tables).pack(side=tk.LEFT, padx=5)
+        self.ai_status_var = tk.StringVar(value="")
+        tk.Label(row1, textvariable=self.ai_status_var, fg="#1a73e8").pack(side=tk.LEFT, padx=10)
+
+        self.info_label = tk.Label(
+            top_frame,
+            text="未选择文件夹 | 支持 .h/.cpp/.c 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
+            anchor="w")
+        self.info_label.pack(fill=tk.X, padx=5, pady=(4, 0))
 
         # 文件标签栏
         tab_frame = tk.Frame(self, height=30, bg="#eee")
@@ -273,13 +504,14 @@ class App(tk.Tk):
         prio_frame = tk.Frame(paned)
         paned.add(prio_frame, minsize=160)
         tk.Label(prio_frame, text="📌 预调整栏", font=("", 10, "bold")).pack(anchor="w")
-        cols = ("type", "name", "value", "pos", "up", "del")
+        cols = ("type", "name", "value", "note", "pos", "up", "del")
+        col_defs = [("type", 70, "类型"), ("name", 200, "参数名"), ("value", 150, "值"),
+                    ("note", 250, "说明"), ("pos", 100, "位置"), ("up", 36, "↑"), ("del", 36, "×")]
         self.tree_prio = ttk.Treeview(prio_frame, columns=cols, show="headings", height=6, selectmode="browse")
-        for c, w, t in [("type", 80, "类型"), ("name", 240, "参数名"), ("value", 180, "值"),
-                        ("pos", 100, "位置"), ("up", 40, "↑"), ("del", 40, "×")]:
+        for c, w, t in col_defs:
             self.tree_prio.heading(c, text=t)
             self.tree_prio.column(c, width=w, anchor="center")
-        self.tree_prio.tag_configure(self.unsaved_tag, background="#fff3cd")
+        self._config_tree_tags(self.tree_prio)
         self.tree_prio.pack(fill=tk.BOTH, expand=True, pady=2)
         self.tree_prio.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree_prio.bind("<ButtonRelease-1>", lambda e: self.on_click(True, e, self.tree_prio))
@@ -289,11 +521,10 @@ class App(tk.Tk):
         paned.add(norm_frame, minsize=200)
         tk.Label(norm_frame, text="📋 参数列表", font=("", 10, "bold")).pack(anchor="w")
         self.tree_norm = ttk.Treeview(norm_frame, columns=cols, show="headings", height=12, selectmode="browse")
-        for c, w, t in [("type", 80, "类型"), ("name", 240, "参数名"), ("value", 180, "值"),
-                        ("pos", 100, "位置"), ("up", 40, "↑"), ("del", 40, "×")]:
+        for c, w, t in col_defs:
             self.tree_norm.heading(c, text=t)
             self.tree_norm.column(c, width=w, anchor="center")
-        self.tree_norm.tag_configure(self.unsaved_tag, background="#fff3cd")
+        self._config_tree_tags(self.tree_norm)
         self.tree_norm.pack(fill=tk.BOTH, expand=True, pady=2)
         self.tree_norm.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree_norm.bind("<ButtonRelease-1>", lambda e: self.on_click(False, e, self.tree_norm))
@@ -311,6 +542,11 @@ class App(tk.Tk):
         self.btn_save.pack(side=tk.LEFT, padx=3)
         self.btn_save_all = tk.Button(bot_frame, text="💾 保存全部", state=tk.DISABLED, command=self.save_all)
         self.btn_save_all.pack(side=tk.LEFT, padx=3)
+
+    def _config_tree_tags(self, tree):
+        tree.tag_configure(self.unsaved_tag, background="#fff3cd")
+        tree.tag_configure(self.ai_rec_tag, background="#e8f5e9")
+        tree.tag_configure(self.ai_filtered_tag, background="#f0f0f0", foreground="#999999")
 
     def on_close(self):
         generate_tune_log(self.param_map)
@@ -351,7 +587,8 @@ class App(tk.Tk):
         self.refresh_tables()
 
     def refresh_tables(self):
-        # 清空表格
+        # 清空表格和映射
+        self.item_map.clear()
         for tree in [self.tree_prio, self.tree_norm]:
             for item in tree.get_children():
                 tree.delete(item)
@@ -362,22 +599,32 @@ class App(tk.Tk):
             self.btn_save_all.config(state=tk.DISABLED)
             return
 
+        show_filtered = self.show_filtered_var.get()
+
         # 填充表格（确保所有参数都显示）
         for p in params:
             if p["hidden"]:
                 continue
+            if p.get("ai_filtered") and not show_filtered:
+                continue
             val = p["new_value"] if p["new_value"] is not None else p["value"]
+            note = p.get("ai_note") or ""
             pos = f"{p['file_name']}:{p['line']}"
-            values = (p["type"], p["name"], val, pos, "↑", "×")
+            values = (p["type"], p["name"], val, note, pos, "↑", "×")
             # 按优先级分配表格
-            if p["is_priority"]:
-                item = self.tree_prio.insert("", "end", values=values)
-            else:
-                item = self.tree_norm.insert("", "end", values=values)
-            # 标记未保存修改
+            tree = self.tree_prio if p["is_priority"] else self.tree_norm
+            item = tree.insert("", "end", values=values)
+            self.item_map[(str(tree), item)] = p
+            # 标记状态：未保存修改 / AI 过滤 / AI 推荐
+            tags = []
             if p["is_modified"]:
-                tree = self.tree_prio if p["is_priority"] else self.tree_norm
-                tree.item(item, tags=(self.unsaved_tag,))
+                tags.append(self.unsaved_tag)
+            if p.get("ai_filtered"):
+                tags.append(self.ai_filtered_tag)
+            elif p.get("ai_recommend"):
+                tags.append(self.ai_rec_tag)
+            if tags:
+                tree.item(item, tags=tuple(tags))
 
         # 更新保存全部按钮状态
         has_unsaved = any(p["is_modified"] for p in params)
@@ -392,21 +639,18 @@ class App(tk.Tk):
         if not item:
             return
 
-        # 获取当前参数
-        item_idx = tree.index(item)
-        params = self.param_map.get(self.current_file, [])
-        if item_idx >= len(params):
+        p = self.item_map.get((str(tree), item))
+        if not p:
             return
-        p = params[item_idx]
 
         # 处理↑按钮（加入预调栏）
-        if col == "#5":
+        if col == "#6":
             p["is_priority"] = True
             self.refresh_tables()
             return
 
         # 处理×按钮（区分预调栏和参数列表）
-        if col == "#6":
+        if col == "#7":
             if is_priority_tree:
                 # 预调栏×：退回参数列表
                 p["is_priority"] = False
@@ -419,19 +663,13 @@ class App(tk.Tk):
     def on_tree_select(self, event):
         tree = event.widget
         item = tree.focus()
-        if not item:
+        p = self.item_map.get((str(tree), item)) if item else None
+        if not p:
             self.selected_param = None
             self.entry_val.delete(0, tk.END)
             self.btn_apply.config(state=tk.DISABLED)
             self.btn_save.config(state=tk.DISABLED)
             return
-
-        # 获取选中参数
-        item_idx = tree.index(item)
-        params = self.param_map.get(self.current_file, [])
-        if item_idx >= len(params):
-            return
-        p = params[item_idx]
 
         self.selected_param = p
         # 自动全选输入框
@@ -486,6 +724,71 @@ class App(tk.Tk):
                 success_count += 1
         self.refresh_tables()
         messagebox.showinfo("成功", f"共保存 {success_count}/{len(modified_params)} 项")
+
+    # ==================== AI 识别 ====================
+
+    def ai_scan_all(self):
+        api_key, model = get_ai_settings()
+        if not api_key:
+            ensure_key_field()
+            messagebox.showinfo(
+                "需要 API Key",
+                "未配置 DeepSeek API Key。\n\n"
+                "已把配置项写入根目录 config.json，请填写后重试：\n"
+                "  \"deepseek_api_key\": \"\"   ← 在这里填 Key")
+            return
+
+        files = [fp for fp in self.param_map if self.param_map[fp]]
+        if not files:
+            messagebox.showinfo("提示", "请先选择文件夹（没有扫描到含参数的文件）")
+            return
+
+        self.btn_ai.config(state=tk.DISABLED)
+        self.ai_status_var.set(f"AI 识别准备中（共 {len(files)} 个文件）...")
+        threading.Thread(target=self._ai_worker, args=(files, api_key, model), daemon=True).start()
+
+    def _ai_worker(self, files, api_key, model):
+        total_f = total_a = total_r = 0
+        errors = []
+        for i, fp in enumerate(files, 1):
+            self.root.after(0, self.ai_status_var.set,
+                            f"AI 识别中 {i}/{len(files)}：{os.path.basename(fp)}")
+            try:
+                lines = read_file_lines(fp)
+                params = self.param_map[fp]
+                file_text = build_numbered_text(lines, params)
+                cand_text = "\n".join(f"{p['line']}: {p['name']}" for p in params)
+                ai_data = call_deepseek(file_text, cand_text, api_key, model)
+                f, a, r = apply_ai_result(params, ai_data, lines, fp)
+                total_f += f
+                total_a += a
+                total_r += r
+            except Exception as e:
+                errors.append(f"{os.path.basename(fp)}: {e}")
+        self.root.after(0, self._ai_done, total_f, total_a, total_r, errors)
+
+    def _ai_done(self, total_f, total_a, total_r, errors):
+        self.btn_ai.config(state=tk.NORMAL)
+        self.ai_status_var.set(f"AI 识别完成：过滤 {total_f}，补充 {total_a}，推荐 {total_r}")
+        self.refresh_tables()
+        msg = f"AI 识别完成\n\n过滤误报：{total_f} 项\n补充发现：{total_a} 项\n推荐置顶：{total_r} 项"
+        if errors:
+            msg += "\n\n以下文件识别失败：\n" + "\n".join(errors[:8])
+        messagebox.showinfo("AI 识别", msg)
+
+    def apply_ai_recommend(self):
+        count = 0
+        for params in self.param_map.values():
+            for p in params:
+                if p.get("ai_recommend") and not p["is_priority"]:
+                    p["is_priority"] = True
+                    count += 1
+        self.refresh_tables()
+        if count:
+            messagebox.showinfo("提示", f"已把 {count} 个 AI 推荐参数加入预调栏")
+        else:
+            messagebox.showinfo("提示", "没有可采用的 AI 推荐（请先执行 AI 识别）")
+
 
 if __name__ == "__main__":
     app = App()

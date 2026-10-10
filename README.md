@@ -23,6 +23,8 @@ my toolbox for yolo learner
 | conda_env | 训练环境名（默认 yolov5） |
 | env_python | 直接指定训练环境的 python.exe 路径（优先级最高） |
 | yolov5_dir | yolov5 仓库目录 |
+| deepseek_api_key | 参数扫描工具「AI 识别」用的 DeepSeek API Key（可选） |
+| deepseek_model | AI 识别模型名，默认 deepseek-flash（可选 deepseek-v4-pro） |
 
 ## 工具列表
 
@@ -35,6 +37,7 @@ my toolbox for yolo learner
   - 双栏管理：预调栏（置顶常用参数）+ 参数列表
   - 一键置顶、隐藏参数
   - 支持单条/批量保存，关闭时自动生成修改日志
+  - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数（需在 config.json 填写 deepseek_api_key）
 
 ### 2️⃣ 文件批量重命名 (change_name.py)
 

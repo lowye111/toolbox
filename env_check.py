@@ -19,6 +19,8 @@ DEFAULT_CONFIG = {
     "conda_env": "yolov5",  # 模型训练使用的 conda 环境名
     "env_python": "",       # 可选：直接指定该环境的 python.exe 路径（优先级最高）
     "yolov5_dir": "",       # 可选：yolov5 仓库目录（使用 yolov5 系列模型训练/测试时）
+    "deepseek_api_key": "",              # 可选：参数扫描工具 AI 识别用的 DeepSeek API Key
+    "deepseek_model": "deepseek-flash",  # 可选：DeepSeek 模型名（官方列表：deepseek-flash / deepseek-v4-pro）
 }
 
 # 模块名 -> pip 包名
