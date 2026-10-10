@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "yolov5_dir": "",       # 可选：yolov5 仓库目录（使用 yolov5 系列模型训练/测试时）
     "deepseek_api_key": "",              # 可选：参数扫描工具 AI 识别用的 DeepSeek API Key
     "deepseek_model": "deepseek-flash",  # 可选：DeepSeek 模型名（官方列表：deepseek-flash / deepseek-v4-pro）
+    "notes_dir": "",                     # 可选：参数扫描工具说明文件的保存目录（留空=工具目录下 notes 文件夹）
 }
 
 # 模块名 -> pip 包名

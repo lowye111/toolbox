@@ -25,6 +25,7 @@ my toolbox for yolo learner
 | yolov5_dir | yolov5 仓库目录 |
 | deepseek_api_key | 参数扫描工具「AI 识别」用的 DeepSeek API Key（可选） |
 | deepseek_model | AI 识别模型名，默认 deepseek-flash（可选 deepseek-v4-pro） |
+| notes_dir | 参数扫描工具「说明」文件的保存目录（默认 toolbox/notes） |
 
 ## 工具列表
 
@@ -38,6 +39,7 @@ my toolbox for yolo learner
   - 一键置顶、隐藏参数
   - 支持单条/批量保存，关闭时自动生成修改日志
   - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数（需在 config.json 填写 deepseek_api_key）
+  - 📝 手动说明：为参数添加备注，集中保存（默认 toolbox/notes，可用 config.json 的 notes_dir 指定），重开同一工作区自动加载
 
 ### 2️⃣ 文件批量重命名 (change_name.py)
 

@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import hashlib
 import queue
 import threading
 import urllib.request
@@ -57,6 +58,7 @@ def make_param(path, line_num, type_name, name, value, original_line):
         "new_value": None, "is_modified": False, "is_priority": False,
         "hidden": False,
         "ai_note": "", "ai_filtered": False, "ai_recommend": False,
+        "note_manual": "",
     }
 
 
@@ -317,6 +319,57 @@ def ensure_key_field():
         env_check.save_config(cfg)
 
 
+# ==================== 参数说明（手动备注，集中保存） ====================
+
+def get_notes_dir():
+    """说明文件的保存目录：config.json 的 notes_dir，留空则用工具目录下的 notes 文件夹"""
+    if env_check:
+        cfg = env_check.load_config()
+        d = (cfg.get("notes_dir") or "").strip()
+        if d:
+            return d
+        return str(env_check.ROOT / "notes")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "notes")
+
+
+def workspace_notes_path(folder):
+    """按工作区路径生成说明文件：<说明目录>/<目录名>_<路径hash>.json（同一工作区固定同名，便于自动加载）"""
+    folder = os.path.abspath(folder)
+    base = os.path.basename(os.path.normpath(folder)) or "workspace"
+    tag = hashlib.md5(folder.lower().encode("utf-8")).hexdigest()[:8]
+    return os.path.join(get_notes_dir(), f"{base}_{tag}.json")
+
+
+def notes_param_key(file_path, folder):
+    """说明条目的键：工作区相对路径::参数名（不用行号，代码增删行后依然有效）"""
+    try:
+        rel = os.path.relpath(file_path, folder)
+    except Exception:
+        rel = file_path
+    return rel.replace("\\", "/")
+
+
+def load_notes(notes_path):
+    """读取说明文件，返回 {键: 说明}；失败返回空字典"""
+    try:
+        with open(notes_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("notes", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_notes(notes_path, notes):
+    """保存说明文件（自动创建目录），成功返回 True"""
+    try:
+        os.makedirs(os.path.dirname(notes_path), exist_ok=True)
+        with open(notes_path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "notes": notes}, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def _ssl_context():
     """优先用 certifi 证书（requests 的证书包），失败则用系统默认"""
     try:
@@ -461,6 +514,9 @@ class App(tk.Tk):
         self.all_files = []
         self.current_file = ""
         self.last_folder = ""
+        self.notes_path = ""       # 当前工作区的说明文件路径
+        self.notes_data = {}       # 说明数据：键 -> 说明内容
+        self._notes_warned = False
         self.unsaved_tag = "unsaved"
         self.ai_rec_tag = "ai_rec"
         self.ai_filtered_tag = "ai_filtered"
@@ -565,12 +621,20 @@ class App(tk.Tk):
         self.btn_save_all = tk.Button(bot_frame, text="💾 保存全部", state=tk.DISABLED, command=self.save_all)
         self.btn_save_all.pack(side=tk.LEFT, padx=3)
 
+        # 手动说明（选中参数后填写，回车/失焦自动保存）
+        self.entry_note = tk.Entry(bot_frame, width=36)
+        self.entry_note.pack(side=tk.RIGHT, padx=(0, 4))
+        tk.Label(bot_frame, text="📝 说明：").pack(side=tk.RIGHT)
+        self.entry_note.bind("<Return>", lambda e: self.save_note())
+        self.entry_note.bind("<FocusOut>", lambda e: self.save_note())
+
     def _config_tree_tags(self, tree):
         tree.tag_configure(self.unsaved_tag, background="#fff3cd")
         tree.tag_configure(self.ai_rec_tag, background="#e8f5e9")
         tree.tag_configure(self.ai_filtered_tag, background="#f0f0f0", foreground="#999999")
 
     def on_close(self):
+        self.save_note()  # 保存尚在输入框中的说明
         generate_tune_log(self.param_map)
         self.destroy()
 
@@ -582,8 +646,20 @@ class App(tk.Tk):
         self.param_map, scanned_files = scan_folder(folder)
         # 标签栏只显示"扫出参数"的文件；无参数的文件不显示（AI 识别本来也会跳过它们）
         self.all_files = [fp for fp in scanned_files if self.param_map.get(fp)]
-        self.info_label.config(
-            text=f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self.all_files)}")
+        # 加载该工作区保存过的参数说明（集中存放在说明目录，按工作区路径区分）
+        self.notes_path = workspace_notes_path(folder)
+        self.notes_data = load_notes(self.notes_path)
+        loaded = 0
+        for fp, params in self.param_map.items():
+            for p in params:
+                key = notes_param_key(fp, folder) + "::" + p["name"]
+                if key in self.notes_data:
+                    p["note_manual"] = self.notes_data[key]
+                    loaded += 1
+        info = f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self.all_files)}"
+        if loaded:
+            info += f" | 已载说明：{loaded} 条"
+        self.info_label.config(text=info)
         self.rebuild_tabs()
         if self.all_files:
             self.switch_file(self.all_files[0])
@@ -696,6 +772,7 @@ class App(tk.Tk):
                 self.refresh_tables()
         # 只销毁被关闭的标签控件，不重建全部（避免文件多时卡顿）
         holder = self.tab_widgets.pop(fp, None)
+        self.tab_buttons.pop(fp, None)
         if holder:
             holder.destroy()
         self._shown_files = list(self.tab_widgets.keys())
@@ -705,6 +782,7 @@ class App(tk.Tk):
         self.current_file = fp
         self.selected_param = None
         self.entry_val.delete(0, tk.END)
+        self.entry_note.delete(0, tk.END)
         self.btn_apply.config(state=tk.DISABLED)
         self.btn_save.config(state=tk.DISABLED)
         self.title(f"参数编辑工具 {VERSION} - {os.path.basename(fp)}")
@@ -733,7 +811,7 @@ class App(tk.Tk):
             if p.get("ai_filtered") and not show_filtered:
                 continue
             val = p["new_value"] if p["new_value"] is not None else p["value"]
-            note = p.get("ai_note") or ""
+            note = p.get("note_manual") or p.get("ai_note") or ""
             pos = f"{p['file_name']}:{p['line']}"
             values = (p["type"], p["name"], val, note, pos, "↑", "×")
             # 按优先级分配表格
@@ -792,6 +870,7 @@ class App(tk.Tk):
         if not p:
             self.selected_param = None
             self.entry_val.delete(0, tk.END)
+            self.entry_note.delete(0, tk.END)
             self.btn_apply.config(state=tk.DISABLED)
             self.btn_save.config(state=tk.DISABLED)
             return
@@ -801,9 +880,31 @@ class App(tk.Tk):
         self.entry_val.delete(0, tk.END)
         self.entry_val.insert(0, p["new_value"] or p["value"])
         self.entry_val.selection_range(0, tk.END)
+        # 填充手动说明
+        self.entry_note.delete(0, tk.END)
+        self.entry_note.insert(0, p.get("note_manual", ""))
         # 启用按钮
         self.btn_apply.config(state=tk.NORMAL)
         self.btn_save.config(state=tk.NORMAL)
+
+    def save_note(self):
+        """保存当前参数的手动说明（回车/失焦/关闭时触发）"""
+        if not self.selected_param:
+            return
+        text = self.entry_note.get().strip()
+        if text == self.selected_param.get("note_manual", ""):
+            return
+        self.selected_param["note_manual"] = text
+        if self.last_folder and self.notes_path:
+            key = notes_param_key(self.selected_param["file_path"], self.last_folder) + "::" + self.selected_param["name"]
+            if text:
+                self.notes_data[key] = text
+            else:
+                self.notes_data.pop(key, None)
+            if not save_notes(self.notes_path, self.notes_data) and not self._notes_warned:
+                self._notes_warned = True
+                messagebox.showwarning("提示", f"说明文件保存失败（目录不可写？）：\n{self.notes_path}")
+        self.refresh_tables()
 
     def apply_val(self):
         if not self.selected_param:
