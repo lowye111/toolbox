@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import queue
 import threading
 import urllib.request
 import urllib.error
@@ -361,7 +362,7 @@ def call_deepseek(file_text, candidates_text, api_key, model):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 401:
@@ -458,6 +459,7 @@ class App(tk.Tk):
         self.ai_rec_tag = "ai_rec"
         self.ai_filtered_tag = "ai_filtered"
         self.item_map = {}  # (tree, item_id) -> 参数项
+        self.ai_queue = queue.Queue()  # AI 识别线程 -> 主线程消息队列
         self.selected_param = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -478,6 +480,8 @@ class App(tk.Tk):
                        command=self.refresh_tables).pack(side=tk.LEFT, padx=5)
         self.ai_status_var = tk.StringVar(value="")
         tk.Label(row1, textvariable=self.ai_status_var, fg="#1a73e8").pack(side=tk.LEFT, padx=10)
+        self.ai_progress = ttk.Progressbar(row1, orient="horizontal", length=170, mode="determinate")
+        self.ai_progress.pack(side=tk.LEFT, padx=(0, 10))
 
         self.info_label = tk.Label(
             top_frame,
@@ -485,16 +489,19 @@ class App(tk.Tk):
             anchor="w")
         self.info_label.pack(fill=tk.X, padx=5, pady=(4, 0))
 
-        # 文件标签栏
-        tab_frame = tk.Frame(self, height=30, bg="#eee")
+        # 文件标签栏（横向滚动条 + 滚轮滚动 + 每个文件可关闭）
+        tab_frame = tk.Frame(self, bg="#eee")
         tab_frame.pack(fill=tk.X, padx=5)
-        self.tab_canvas = tk.Canvas(tab_frame, height=25, bg="#eee")
+        self.tab_canvas = tk.Canvas(tab_frame, bg="#eee", height=34, highlightthickness=0)
         self.tab_scroll = ttk.Scrollbar(tab_frame, orient=tk.HORIZONTAL, command=self.tab_canvas.xview)
+        self.tab_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tab_canvas.pack(side=tk.TOP, fill=tk.X)
+        self.tab_canvas.configure(xscrollcommand=self.tab_scroll.set)
         self.tab_inner = tk.Frame(self.tab_canvas, bg="#eee")
         self.tab_canvas.create_window((0, 0), window=self.tab_inner, anchor="nw")
-        self.tab_canvas.configure(xscrollcommand=self.tab_scroll.set)
-        self.tab_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.tab_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.tab_inner.bind("<Configure>",
+                            lambda e: self.tab_canvas.configure(scrollregion=self.tab_canvas.bbox("all")))
+        self.tab_canvas.bind("<MouseWheel>", self._tab_wheel)
 
         # 双栏面板
         paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6)
@@ -565,18 +572,50 @@ class App(tk.Tk):
         if self.all_files:
             self.switch_file(self.all_files[0])
 
+    def _tab_wheel(self, event):
+        """标签栏横向滚动"""
+        self.tab_canvas.xview_scroll(int(-event.delta / 120) * 3, "units")
+        return "break"
+
     def rebuild_tabs(self):
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
-        # 添加文件标签
+        # 添加文件标签（右上角 × 可关闭）
         for fp in self.all_files:
             fn = os.path.basename(fp)
-            btn = tk.Button(self.tab_inner, text=fn, padx=4, pady=1,
+            holder = tk.Frame(self.tab_inner, bg="#eee")
+            holder.pack(side=tk.LEFT, padx=2, pady=1)
+            btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
                             command=lambda p=fp: self.switch_file(p))
-            btn.pack(side=tk.LEFT, padx=2)
+            btn.pack()
+            close = tk.Label(holder, text="×", fg="#999999", bg="#e2e2e2",
+                             cursor="hand2", font=("", 8, "bold"))
+            close.place(relx=1.0, rely=0.0, anchor="ne")
+            close.bind("<Button-1>", lambda e, p=fp: self.close_file_tab(p))
+            close.bind("<Enter>", lambda e, w=close: w.config(fg="#d32f2f"))
+            close.bind("<Leave>", lambda e, w=close: w.config(fg="#999999"))
+            for w in (holder, btn, close):
+                w.bind("<MouseWheel>", self._tab_wheel)
         # 更新滚动范围
         self.tab_canvas.configure(scrollregion=self.tab_canvas.bbox("all"))
+
+    def close_file_tab(self, fp):
+        """关闭文件标签：仅从当前列表移除，不改动磁盘文件"""
+        self.param_map.pop(fp, None)
+        if fp in self.all_files:
+            self.all_files.remove(fp)
+        if self.current_file == fp:
+            self.current_file = ""
+            if self.all_files:
+                self.switch_file(self.all_files[0])
+            else:
+                self.selected_param = None
+                self.entry_val.delete(0, tk.END)
+                self.btn_apply.config(state=tk.DISABLED)
+                self.btn_save.config(state=tk.DISABLED)
+                self.refresh_tables()
+        self.rebuild_tabs()
 
     def switch_file(self, fp):
         self.current_file = fp
@@ -744,31 +783,60 @@ class App(tk.Tk):
             return
 
         self.btn_ai.config(state=tk.DISABLED)
+        self.ai_progress.config(maximum=len(files), value=0)
         self.ai_status_var.set(f"AI 识别准备中（共 {len(files)} 个文件）...")
+        self.after(150, self._ai_poll)
         threading.Thread(target=self._ai_worker, args=(files, api_key, model), daemon=True).start()
 
     def _ai_worker(self, files, api_key, model):
+        """后台线程：只做网络与数据处理，所有进度通过队列交给主线程（不直接操作界面）"""
+        total = len(files)
         total_f = total_a = total_r = 0
         errors = []
-        for i, fp in enumerate(files, 1):
-            self.root.after(0, self.ai_status_var.set,
-                            f"AI 识别中 {i}/{len(files)}：{os.path.basename(fp)}")
-            try:
-                lines = read_file_lines(fp)
-                params = self.param_map[fp]
-                file_text = build_numbered_text(lines, params)
-                cand_text = "\n".join(f"{p['line']}: {p['name']}" for p in params)
-                ai_data = call_deepseek(file_text, cand_text, api_key, model)
-                f, a, r = apply_ai_result(params, ai_data, lines, fp)
-                total_f += f
-                total_a += a
-                total_r += r
-            except Exception as e:
-                errors.append(f"{os.path.basename(fp)}: {e}")
-        self.root.after(0, self._ai_done, total_f, total_a, total_r, errors)
+        try:
+            for i, fp in enumerate(files, 1):
+                self.ai_queue.put(("start", i, total, os.path.basename(fp)))
+                try:
+                    lines = read_file_lines(fp)
+                    params = self.param_map[fp]
+                    file_text = build_numbered_text(lines, params)
+                    cand_text = "\n".join(f"{p['line']}: {p['name']}" for p in params)
+                    ai_data = call_deepseek(file_text, cand_text, api_key, model)
+                    f, a, r = apply_ai_result(params, ai_data, lines, fp)
+                    total_f += f
+                    total_a += a
+                    total_r += r
+                except Exception as e:
+                    errors.append(f"{os.path.basename(fp)}: {e}")
+                self.ai_queue.put(("file_done", i, total, total_f, total_a, total_r))
+        finally:
+            self.ai_queue.put(("done", total_f, total_a, total_r, errors))
+
+    def _ai_poll(self):
+        """主线程轮询：处理 AI 识别线程发来的消息并更新界面"""
+        try:
+            while True:
+                msg = self.ai_queue.get_nowait()
+                kind = msg[0]
+                if kind == "start":
+                    _, i, total, name = msg
+                    self.ai_status_var.set(f"AI 识别中 {i}/{total}：{name}")
+                    self.ai_progress.config(value=i - 1)
+                elif kind == "file_done":
+                    _, i, total, tf, ta, tr = msg
+                    self.ai_progress.config(value=i)
+                    self.ai_status_var.set(f"AI 识别 {i}/{total}（过滤 {tf}，补充 {ta}，推荐 {tr}）")
+                elif kind == "done":
+                    _, tf, ta, tr, errors = msg
+                    self._ai_done(tf, ta, tr, errors)
+                    return
+        except queue.Empty:
+            pass
+        self.after(150, self._ai_poll)
 
     def _ai_done(self, total_f, total_a, total_r, errors):
         self.btn_ai.config(state=tk.NORMAL)
+        self.ai_progress.config(value=self.ai_progress["maximum"])
         self.ai_status_var.set(f"AI 识别完成：过滤 {total_f}，补充 {total_a}，推荐 {total_r}")
         self.refresh_tables()
         msg = f"AI 识别完成\n\n过滤误报：{total_f} 项\n补充发现：{total_a} 项\n推荐置顶：{total_r} 项"
