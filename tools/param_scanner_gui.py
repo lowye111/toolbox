@@ -510,6 +510,7 @@ class App(tk.Tk):
         self.tab_canvas.bind("<MouseWheel>", self._tab_wheel)
         self.tab_canvas.bind("<Configure>", self._on_tab_resize)
         self.tab_widgets = {}  # 文件路径 -> 标签控件
+        self.tab_buttons = {}  # 文件路径 -> 标签按钮（用于高亮当前文件）
 
         # 双栏面板
         paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6)
@@ -603,12 +604,23 @@ class App(tk.Tk):
         if self._filtered_files() != getattr(self, "_shown_files", None):
             self.rebuild_tabs()
 
+    def _highlight_current_tab(self):
+        """高亮当前选中的文件标签，其余恢复默认样式"""
+        for fp, btn in self.tab_buttons.items():
+            if fp == self.current_file:
+                btn.config(bg="#1a73e8", fg="#ffffff",
+                           activebackground="#1667c8", activeforeground="#ffffff")
+            else:
+                btn.config(bg="#f0f0f0", fg="#000000",
+                           activebackground="#e6e6e6", activeforeground="#000000")
+
     def rebuild_tabs(self):
         """重新创建文件标签（选文件夹/搜索过滤时调用）"""
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
         self.tab_widgets = {}
+        self.tab_buttons = {}
         # 创建文件标签（右上角 × 可关闭）
         for fp in self._filtered_files():
             fn = os.path.basename(fp)
@@ -625,8 +637,10 @@ class App(tk.Tk):
             for w in (holder, btn, close):
                 w.bind("<MouseWheel>", self._tab_wheel)
             self.tab_widgets[fp] = holder
+            self.tab_buttons[fp] = btn
         self._shown_files = list(self.tab_widgets.keys())
         self._layout_tabs(reset_scroll=True)
+        self._highlight_current_tab()
 
     def _layout_tabs(self, reset_scroll=False):
         """把文件标签按容器宽度排成多行，高度超出部分垂直滚动（不重建控件，速度快）"""
@@ -687,6 +701,8 @@ class App(tk.Tk):
         self.entry_val.delete(0, tk.END)
         self.btn_apply.config(state=tk.DISABLED)
         self.btn_save.config(state=tk.DISABLED)
+        self.title(f"参数编辑工具 {VERSION} - {os.path.basename(fp)}")
+        self._highlight_current_tab()
         self.refresh_tables()
 
     def refresh_tables(self):
