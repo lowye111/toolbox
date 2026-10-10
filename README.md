@@ -34,7 +34,7 @@ my toolbox for yolo learner
 - 图标：⚙️
 - 功能：批量查看、编辑、管理代码参数
 - 特点：
-  - 自动识别 .h/.hpp/.c/.cpp/.cc/.cxx 代码文件中的参数
+  - 自动识别 .h/.hpp/.c/.cpp/.cc/.cxx 及 .yaml/.yml/.ini/.cfg/.conf/.ino 文件中的参数
   - 双栏管理：预调栏（置顶常用参数）+ 参数列表
   - 一键置顶、隐藏参数
   - 支持单条/批量保存，关闭时自动生成修改日志

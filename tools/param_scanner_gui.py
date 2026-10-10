@@ -76,8 +76,11 @@ def scan_file(path):
 
     for line in lines:
         stripped = line.strip()
-        # 跳过注释和空行
+        # 跳过注释和空行；# 开头的行跳过（保留 #define，兼容 YAML/INI 的 # 注释）
         if not stripped or stripped.startswith(('//', '/*')):
+            line_num += 1
+            continue
+        if stripped.startswith('#') and not stripped.startswith('#define'):
             line_num += 1
             continue
 
@@ -201,7 +204,8 @@ SKIP_DIRS = {"devel", "build", "install"}
 
 
 def scan_folder(folder):
-    exts = ('.h', '.hpp', '.c', '.cpp', '.cc', '.cxx')
+    exts = ('.h', '.hpp', '.hh', '.hxx', '.c', '.cpp', '.cc', '.cxx', '.ino',
+            '.yaml', '.yml', '.ini', '.cfg', '.conf')
     param_map = {}
     all_files = []
 
@@ -239,21 +243,22 @@ def save_param(item, new_value):
 
     line = lines[line_idx]
 
-    # 支持保存单冒号
+    # 支持保存单冒号；保留行尾注释（// 或 #）
+    suffix_re = r'(\s*;?\s*(?:#|//).*|\s*;?\s*)$'
     if ":" in line:
-        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*:\s*)(.*?)(\s*;?\s*)$', re.DOTALL)
+        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*:\s*)(.*?)' + suffix_re, re.DOTALL)
     else:
-        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*=\s*)(.*?)(\s*;?\s*)$', re.DOTALL)
+        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*=\s*)(.*?)' + suffix_re, re.DOTALL)
 
     match = pattern.search(line)
     if not match:
         messagebox.showerror("错误", "未找到参数格式")
         return False
 
+    # 保留匹配区域之外的内容（行首的类型修饰词如 float/static、行尾换行等）
     prefix = match.group(1)
     suffix = match.group(3)
-    new_line = prefix + new_value + suffix
-    lines[line_idx] = new_line
+    lines[line_idx] = line[:match.start()] + prefix + new_value + suffix + line[match.end():]
 
     try:
         with open(fp, 'w', encoding='utf-8') as f:
@@ -554,7 +559,7 @@ class App(tk.Tk):
 
         self.info_label = tk.Label(
             top_frame,
-            text="未选择文件夹 | 支持 .h/.cpp/.c 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
+            text="未选择文件夹 | 支持 .h/.c/.cpp/.yaml/.ini 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
             anchor="w")
         self.info_label.pack(fill=tk.X, padx=5, pady=(4, 0))
 
