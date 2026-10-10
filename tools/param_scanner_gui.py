@@ -589,6 +589,7 @@ class App(tk.Tk):
         for c, w, t in col_defs:
             self.tree_prio.heading(c, text=t)
             self.tree_prio.column(c, width=w, anchor="center")
+        self.tree_prio.heading("up", text="↓")  # 预调栏：下箭头=退回参数列表
         self._config_tree_tags(self.tree_prio)
         self.tree_prio.pack(fill=tk.BOTH, expand=True, pady=2)
         self.tree_prio.bind("<<TreeviewSelect>>", self.on_tree_select)
@@ -770,6 +771,9 @@ class App(tk.Tk):
                 self.btn_apply.config(state=tk.DISABLED)
                 self.btn_save.config(state=tk.DISABLED)
                 self.refresh_tables()
+        else:
+            # 预调栏是跨文件的，被关文件的置顶参数需要从预调栏移除
+            self.refresh_tables()
         # 只销毁被关闭的标签控件，不重建全部（避免文件多时卡顿）
         holder = self.tab_widgets.pop(fp, None)
         self.tab_buttons.pop(fp, None)
@@ -796,42 +800,59 @@ class App(tk.Tk):
             for item in tree.get_children():
                 tree.delete(item)
 
-        # 获取当前文件参数
+        # 当前文件的参数
         params = self.param_map.get(self.current_file, [])
-        if not params:
+        # 预调栏：所有文件中已置顶的参数（切换文件时保留显示）
+        prio_params = [p for plist in self.param_map.values() for p in plist if p["is_priority"]]
+
+        if not params and not prio_params:
             self.btn_save_all.config(state=tk.DISABLED)
             return
 
         show_filtered = self.show_filtered_var.get()
 
-        # 填充表格（确保所有参数都显示）
-        for p in params:
+        def visible(p):
             if p["hidden"]:
-                continue
+                return False
             if p.get("ai_filtered") and not show_filtered:
+                return False
+            return True
+
+        # 预调栏（跨文件）
+        for p in prio_params:
+            if visible(p):
+                self._insert_param_row(self.tree_prio, p)
+
+        # 参数列表（当前文件的非置顶参数）
+        for p in params:
+            if p["is_priority"]:
                 continue
-            val = p["new_value"] if p["new_value"] is not None else p["value"]
-            note = p.get("note_manual") or p.get("ai_note") or ""
-            pos = f"{p['file_name']}:{p['line']}"
-            values = (p["type"], p["name"], val, note, pos, "↑", "×")
-            # 按优先级分配表格
-            tree = self.tree_prio if p["is_priority"] else self.tree_norm
-            item = tree.insert("", "end", values=values)
-            self.item_map[(str(tree), item)] = p
-            # 标记状态：未保存修改 / AI 过滤 / AI 推荐
-            tags = []
-            if p["is_modified"]:
-                tags.append(self.unsaved_tag)
-            if p.get("ai_filtered"):
-                tags.append(self.ai_filtered_tag)
-            elif p.get("ai_recommend"):
-                tags.append(self.ai_rec_tag)
-            if tags:
-                tree.item(item, tags=tuple(tags))
+            if visible(p):
+                self._insert_param_row(self.tree_norm, p)
 
         # 更新保存全部按钮状态
         has_unsaved = any(p["is_modified"] for p in params)
         self.btn_save_all.config(state=tk.NORMAL if has_unsaved else tk.DISABLED)
+
+    def _insert_param_row(self, tree, p):
+        """向表格插入一行参数并记录映射/状态标记"""
+        val = p["new_value"] if p["new_value"] is not None else p["value"]
+        note = p.get("note_manual") or p.get("ai_note") or ""
+        pos = f"{p['file_name']}:{p['line']}"
+        arrow = "↓" if p["is_priority"] else "↑"
+        values = (p["type"], p["name"], val, note, pos, arrow, "×")
+        item = tree.insert("", "end", values=values)
+        self.item_map[(str(tree), item)] = p
+        # 标记状态：未保存修改 / AI 过滤 / AI 推荐
+        tags = []
+        if p["is_modified"]:
+            tags.append(self.unsaved_tag)
+        if p.get("ai_filtered"):
+            tags.append(self.ai_filtered_tag)
+        elif p.get("ai_recommend"):
+            tags.append(self.ai_rec_tag)
+        if tags:
+            tree.item(item, tags=tuple(tags))
 
     def on_click(self, is_priority_tree, e, tree):
         region = tree.identify_region(e.x, e.y)
@@ -846,9 +867,9 @@ class App(tk.Tk):
         if not p:
             return
 
-        # 处理↑按钮（加入预调栏）
+        # 处理箭头：参数列表↑=加入预调栏，预调栏↓=退回参数列表
         if col == "#6":
-            p["is_priority"] = True
+            p["is_priority"] = not is_priority_tree
             self.refresh_tables()
             return
 
