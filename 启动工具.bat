@@ -6,7 +6,7 @@ where python >nul 2>nul
 if errorlevel 1 goto nopython
 
 python "工具菜单.py"
-pause
+if errorlevel 1 pause
 exit /b 0
 
 :nopython
