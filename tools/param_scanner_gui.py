@@ -565,10 +565,11 @@ class App(tk.Tk):
         if not folder:
             return
         self.last_folder = folder
-        self.param_map, self.all_files = scan_folder(folder)
-        # 显示含参数的文件数，方便确认
-        param_file_count = len([f for f in self.param_map if self.param_map[f]])
-        self.info_label.config(text=f"{os.path.basename(folder)} | 总文件：{len(self.all_files)} | 含参数文件：{param_file_count}")
+        self.param_map, scanned_files = scan_folder(folder)
+        # 标签栏只显示"扫出参数"的文件；无参数的文件不显示（AI 识别本来也会跳过它们）
+        self.all_files = [fp for fp in scanned_files if self.param_map.get(fp)]
+        self.info_label.config(
+            text=f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self.all_files)}")
         self.rebuild_tabs()
         if self.all_files:
             self.switch_file(self.all_files[0])
