@@ -194,12 +194,18 @@ def match_param_line(line):
     return None
 
 
+# 扫描时跳过的构建产物目录（ROS 的 devel/build/install 等，避免扫到自动生成的样板文件）
+SKIP_DIRS = {"devel", "build", "install"}
+
+
 def scan_folder(folder):
     exts = ('.h', '.hpp', '.c', '.cpp', '.cc', '.cxx')
     param_map = {}
     all_files = []
 
-    for root, _, files in os.walk(folder):
+    for root, dirs, files in os.walk(folder):
+        # 原地剪枝：跳过构建产物目录（不区分大小写）
+        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
         for fn in files:
             if fn.lower().endswith(exts):
                 fp = os.path.abspath(os.path.join(root, fn))
