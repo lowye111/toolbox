@@ -483,6 +483,13 @@ class App(tk.Tk):
         self.ai_progress = ttk.Progressbar(row1, orient="horizontal", length=170, mode="determinate")
         self.ai_progress.pack(side=tk.LEFT, padx=(0, 10))
 
+        # 右上角：文件名搜索（实时过滤标签栏）
+        self.search_var = tk.StringVar(value="")
+        search_entry = ttk.Entry(row1, textvariable=self.search_var, width=18)
+        search_entry.pack(side=tk.RIGHT, padx=(0, 8))
+        tk.Label(row1, text="🔍 文件名：").pack(side=tk.RIGHT)
+        self.search_var.trace("w", lambda *a: self.apply_tab_filter())
+
         self.info_label = tk.Label(
             top_frame,
             text="未选择文件夹 | 支持 .h/.cpp/.c 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
@@ -584,14 +591,26 @@ class App(tk.Tk):
         if abs(event.width - getattr(self, "_tab_layout_width", 0)) > 40:
             self._layout_tabs()
 
+    def _filtered_files(self):
+        """按搜索关键字过滤文件列表（匹配文件名，忽略大小写）"""
+        kw = self.search_var.get().strip().lower()
+        if not kw:
+            return list(self.all_files)
+        return [fp for fp in self.all_files if kw in os.path.basename(fp).lower()]
+
+    def apply_tab_filter(self):
+        """搜索内容变化：匹配集合变了才重建标签（打字流畅）"""
+        if self._filtered_files() != getattr(self, "_shown_files", None):
+            self.rebuild_tabs()
+
     def rebuild_tabs(self):
-        """重新创建全部文件标签（选文件夹时调用）"""
+        """重新创建文件标签（选文件夹/搜索过滤时调用）"""
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
         self.tab_widgets = {}
         # 创建文件标签（右上角 × 可关闭）
-        for fp in self.all_files:
+        for fp in self._filtered_files():
             fn = os.path.basename(fp)
             holder = tk.Frame(self.tab_inner, bg="#eee")
             btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
@@ -606,6 +625,7 @@ class App(tk.Tk):
             for w in (holder, btn, close):
                 w.bind("<MouseWheel>", self._tab_wheel)
             self.tab_widgets[fp] = holder
+        self._shown_files = list(self.tab_widgets.keys())
         self._layout_tabs(reset_scroll=True)
 
     def _layout_tabs(self, reset_scroll=False):
@@ -658,6 +678,7 @@ class App(tk.Tk):
         holder = self.tab_widgets.pop(fp, None)
         if holder:
             holder.destroy()
+        self._shown_files = list(self.tab_widgets.keys())
         self._layout_tabs()
 
     def switch_file(self, fp):
