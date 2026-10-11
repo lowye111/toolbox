@@ -856,7 +856,7 @@ class App(tk.Tk):
         self.rebuild_tabs()
 
     def _layout_units(self):
-        """标签栏当前的显示顺序（分组标题 + 文件标签，按分组/折叠状态）"""
+        """标签栏当前的显示顺序：(kind, 控件) 列表；kind="header" 的分组标题独占一行"""
         files = self._filtered_files()
         kw = self.search_var.get().strip()
         groups = [] if kw else group_files(files)
@@ -865,18 +865,18 @@ class App(tk.Tk):
             for gname, gfiles in groups:
                 header = self.tab_groups.get(gname)
                 if header is not None:
-                    units.append(header)
+                    units.append(("header", header))
                 if gname not in self.expanded_groups:
                     continue
                 for fp in gfiles:
                     holder = self.tab_widgets.get(fp)
                     if holder is not None:
-                        units.append(holder)
+                        units.append(("file", holder))
         else:
             for fp in files:
                 holder = self.tab_widgets.get(fp)
                 if holder is not None:
-                    units.append(holder)
+                    units.append(("file", holder))
         return units
 
     def _layout_tabs(self, reset_scroll=False):
@@ -888,9 +888,19 @@ class App(tk.Tk):
 
         cur_x = row_y = row_h = 0
         total_h = 0
-        for wdg in self._layout_units():
+        for kind, wdg in self._layout_units():
             w = wdg.winfo_reqwidth()
             h = wdg.winfo_reqheight()
+            if kind == "header":
+                # 分组标题独占一行（先结束当前行，放完后强制换行）
+                if cur_x > 0:
+                    row_y += row_h + 4
+                    cur_x = row_h = 0
+                wdg.place(x=0, y=row_y)
+                row_y += h + 4
+                row_h = 0
+                total_h = row_y
+                continue
             if cur_x > 0 and cur_x + w > canvas_w - 4:
                 row_y += row_h + 4
                 cur_x = row_h = 0
