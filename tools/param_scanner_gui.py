@@ -998,7 +998,7 @@ class App(tk.Tk):
         self._open_ai_select_dialog(files)
 
     def _open_ai_select_dialog(self, files):
-        """弹出文件选择窗口：多选要 AI 识别的文件（默认选中当前文件）"""
+        """弹出文件选择窗口：勾选要 AI 识别的文件（默认勾选当前文件）"""
         dlg = tk.Toplevel(self)
         dlg.title("AI 识别 - 选择文件")
         dlg.transient(self)
@@ -1009,61 +1009,84 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
-        tk.Label(dlg, text=f"共 {len(files)} 个含参数的文件（Ctrl/Shift 多选，双击=只识别该文件）：",
+        tk.Label(dlg, text=f"共 {len(files)} 个含参数的文件（点击行切换勾选）：",
                  anchor="w").pack(fill=tk.X, padx=10, pady=(8, 4))
 
         body = tk.Frame(dlg)
         body.pack(fill=tk.BOTH, expand=True, padx=10)
-        self._ai_lb = tk.Listbox(body, selectmode=tk.EXTENDED, width=64, height=18,
-                                 activestyle="none", exportselection=False)
-        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._ai_lb.yview)
-        self._ai_lb.configure(yscrollcommand=sb.set)
-        self._ai_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._ai_tree = ttk.Treeview(body, columns=("chk", "name", "cnt"), show="headings",
+                                     height=18, selectmode="browse")
+        self._ai_tree.heading("chk", text="✓")
+        self._ai_tree.heading("name", text="文件")
+        self._ai_tree.heading("cnt", text="候选")
+        self._ai_tree.column("chk", width=36, anchor="center", stretch=False)
+        self._ai_tree.column("name", width=340, anchor="w")
+        self._ai_tree.column("cnt", width=56, anchor="center", stretch=False)
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._ai_tree.yview)
+        self._ai_tree.configure(yscrollcommand=sb.set)
+        self._ai_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._ai_dlg_files = list(files)
+        self._ai_checked = {}
+        self._ai_items = {}
         for fp in files:
-            self._ai_lb.insert(tk.END, f"{os.path.basename(fp)}   ({len(self.param_map[fp])} 个候选)")
-        # 默认选中当前正在看的文件
-        if self.current_file in files:
-            idx = files.index(self.current_file)
-            self._ai_lb.selection_set(idx)
-            self._ai_lb.see(idx)
+            checked = (fp == self.current_file)
+            self._ai_checked[fp] = checked
+            item = self._ai_tree.insert("", "end",
+                                        values=("☑" if checked else "☐", os.path.basename(fp),
+                                                f"{len(self.param_map[fp])} 个"))
+            self._ai_items[fp] = item
+        if self.current_file in self._ai_items:
+            self._ai_tree.see(self._ai_items[self.current_file])
 
         btns = tk.Frame(dlg)
         btns.pack(fill=tk.X, padx=10, pady=8)
-        tk.Button(btns, text="▶ 识别选中", width=12, command=self._ai_dialog_start_selected).pack(side=tk.LEFT, padx=4)
-        tk.Button(btns, text="识别全部", width=10, command=self._ai_dialog_start_all).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="全选", width=8, command=self._ai_dialog_check_all).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="全不选", width=8, command=self._ai_dialog_uncheck_all).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="▶ 开始识别", width=12, command=self._ai_dialog_start).pack(side=tk.LEFT, padx=12)
         tk.Button(btns, text="取消", width=8, command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
 
         self._ai_dlg = dlg
-        self._ai_lb.bind("<Double-Button-1>", self._ai_dialog_start_one)
+        self._ai_tree.bind("<Button-1>", self._ai_dialog_toggle)
         dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.update_idletasks()
         dlg.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 60}")
         dlg.focus_set()
 
-    def _ai_dialog_start_selected(self):
-        sel = list(self._ai_lb.curselection())
-        if not sel:
-            messagebox.showinfo("提示", "请先选择要识别的文件（Ctrl/Shift 可多选）", parent=self._ai_dlg)
+    def _ai_set_checked(self, fp, checked):
+        """更新某个文件的勾选状态与显示"""
+        self._ai_checked[fp] = checked
+        item = self._ai_items[fp]
+        vals = list(self._ai_tree.item(item, "values"))
+        vals[0] = "☑" if checked else "☐"
+        self._ai_tree.item(item, values=tuple(vals))
+
+    def _ai_dialog_toggle(self, event):
+        """点击行切换勾选状态"""
+        item = self._ai_tree.identify_row(event.y)
+        if not item:
             return
-        files = [self._ai_dlg_files[i] for i in sel]
+        for fp, it in self._ai_items.items():
+            if it == item:
+                self._ai_set_checked(fp, not self._ai_checked[fp])
+                break
+
+    def _ai_dialog_check_all(self):
+        for fp in self._ai_dlg_files:
+            self._ai_set_checked(fp, True)
+
+    def _ai_dialog_uncheck_all(self):
+        for fp in self._ai_dlg_files:
+            self._ai_set_checked(fp, False)
+
+    def _ai_dialog_start(self):
+        files = [fp for fp in self._ai_dlg_files if self._ai_checked.get(fp)]
+        if not files:
+            messagebox.showinfo("提示", "请至少勾选一个文件", parent=self._ai_dlg)
+            return
         self._ai_dlg.destroy()
         self._start_ai(files)
-
-    def _ai_dialog_start_all(self):
-        files = list(self._ai_dlg_files)
-        self._ai_dlg.destroy()
-        self._start_ai(files)
-
-    def _ai_dialog_start_one(self, event):
-        idx = self._ai_lb.nearest(event.y)
-        if idx < 0:
-            return
-        fp = self._ai_dlg_files[idx]
-        self._ai_dlg.destroy()
-        self._start_ai([fp])
 
     def _start_ai(self, files):
         """开始 AI 识别指定文件（后台线程 + 队列回传进度）"""
