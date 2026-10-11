@@ -226,6 +226,30 @@ def scan_folder(folder):
     return param_map, all_files
 
 
+def group_files(files, threshold=10):
+    """按扩展名分组：数量超过阈值的类型各自成组（如 ".cpp"），其余合并到"其他文件"。
+    未达到"至少一个类型超阈值 + 至少两个组"时返回空列表（保持平铺显示）。"""
+    if not files:
+        return []
+    by_ext = {}
+    for fp in files:
+        ext = os.path.splitext(fp)[1].lower() or "无扩展名"
+        by_ext.setdefault(ext, []).append(fp)
+    groups = []
+    others = []
+    for ext in sorted(by_ext):
+        flist = by_ext[ext]
+        if len(flist) > threshold:
+            groups.append((ext, flist))
+        else:
+            others.extend(flist)
+    if others:
+        groups.append(("其他文件", others))
+    if len(groups) < 2:
+        return []
+    return groups
+
+
 def save_param(item, new_value):
     fp = item["file_path"]
     line_idx = item["line"] - 1
@@ -1110,8 +1134,12 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
-        tk.Label(dlg, text=f"共 {len(files)} 个含参数的文件（点击行切换勾选）：",
-                 anchor="w").pack(fill=tk.X, padx=10, pady=(8, 4))
+        groups = group_files(files)
+        hint = f"共 {len(files)} 个含参数的文件（点击行切换勾选"
+        if groups:
+            hint += "，点击 📁 分组名整组勾选"
+        hint += "）："
+        tk.Label(dlg, text=hint, anchor="w").pack(fill=tk.X, padx=10, pady=(8, 4))
 
         body = tk.Frame(dlg)
         body.pack(fill=tk.BOTH, expand=True, padx=10)
@@ -1123,6 +1151,7 @@ class App(tk.Tk):
         self._ai_tree.column("chk", width=36, anchor="center", stretch=False)
         self._ai_tree.column("name", width=340, anchor="w")
         self._ai_tree.column("cnt", width=56, anchor="center", stretch=False)
+        self._ai_tree.tag_configure("grouprow", background="#eef3fa")
         sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._ai_tree.yview)
         self._ai_tree.configure(yscrollcommand=sb.set)
         self._ai_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1131,13 +1160,33 @@ class App(tk.Tk):
         self._ai_dlg_files = list(files)
         self._ai_checked = {}
         self._ai_items = {}
-        for fp in files:
+        self._ai_groups = {}      # 组名 -> {"header": 标题行, "children": [行], "files": [文件]}
+        self._ai_fp_group = {}    # 文件 -> 所属组名
+
+        def add_file(fp, indent=""):
             checked = (fp == self.current_file)
             self._ai_checked[fp] = checked
             item = self._ai_tree.insert("", "end",
-                                        values=("☑" if checked else "☐", os.path.basename(fp),
+                                        values=("☑" if checked else "☐", indent + os.path.basename(fp),
                                                 f"{len(self.param_map[fp])} 个"))
             self._ai_items[fp] = item
+            return item
+
+        if groups:
+            for gname, gfiles in groups:
+                header = self._ai_tree.insert("", "end",
+                                              values=("☐", f"📁 {gname}（{len(gfiles)} 个）", ""),
+                                              tags=("grouprow",))
+                children = []
+                for fp in gfiles:
+                    children.append(add_file(fp, "    "))
+                    self._ai_fp_group[fp] = gname
+                self._ai_groups[gname] = {"header": header, "children": children, "files": list(gfiles)}
+                self._ai_update_group_header(gname)
+        else:
+            for fp in files:
+                add_file(fp)
+
         if self.current_file in self._ai_items:
             self._ai_tree.see(self._ai_items[self.current_file])
 
@@ -1155,23 +1204,48 @@ class App(tk.Tk):
         dlg.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 60}")
         dlg.focus_set()
 
+    def _ai_update_group_header(self, gname):
+        """刷新分组标题的勾选显示：☑全选 / ◐部分 / ☐全不选"""
+        g = self._ai_groups.get(gname)
+        if not g:
+            return
+        checked = [self._ai_checked.get(fp, False) for fp in g["files"]]
+        if checked and all(checked):
+            mark = "☑"
+        elif any(checked):
+            mark = "◐"
+        else:
+            mark = "☐"
+        vals = list(self._ai_tree.item(g["header"], "values"))
+        vals[0] = mark
+        self._ai_tree.item(g["header"], values=tuple(vals))
+
     def _ai_set_checked(self, fp, checked):
-        """更新某个文件的勾选状态与显示"""
+        """更新某个文件的勾选状态与显示（同步所属分组标题）"""
         self._ai_checked[fp] = checked
         item = self._ai_items[fp]
         vals = list(self._ai_tree.item(item, "values"))
         vals[0] = "☑" if checked else "☐"
         self._ai_tree.item(item, values=tuple(vals))
+        gname = self._ai_fp_group.get(fp)
+        if gname:
+            self._ai_update_group_header(gname)
 
     def _ai_dialog_toggle(self, event):
-        """点击行切换勾选状态"""
+        """点击行切换勾选；点击 📁 分组名整组勾选/取消"""
         item = self._ai_tree.identify_row(event.y)
         if not item:
             return
+        for gname, g in self._ai_groups.items():
+            if g["header"] == item:
+                all_on = all(self._ai_checked.get(fp, False) for fp in g["files"])
+                for fp in g["files"]:
+                    self._ai_set_checked(fp, not all_on)
+                return
         for fp, it in self._ai_items.items():
             if it == item:
                 self._ai_set_checked(fp, not self._ai_checked[fp])
-                break
+                return
 
     def _ai_dialog_check_all(self):
         for fp in self._ai_dlg_files:
