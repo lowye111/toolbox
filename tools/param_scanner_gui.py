@@ -375,6 +375,35 @@ def save_notes(notes_path, notes):
         return False
 
 
+def workspace_session_path(folder):
+    """会话状态文件：与说明文件同目录，命名 <目录名>_<hash>_session.json"""
+    folder = os.path.abspath(folder)
+    base = os.path.basename(os.path.normpath(folder)) or "workspace"
+    tag = hashlib.md5(folder.lower().encode("utf-8")).hexdigest()[:8]
+    return os.path.join(get_notes_dir(), f"{base}_{tag}_session.json")
+
+
+def load_session(session_path):
+    """读取会话状态文件（上次保留的文件/置顶/隐藏），失败返回空字典"""
+    try:
+        with open(session_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_session_file(session_path, session):
+    """保存会话状态文件（自动创建目录），成功返回 True"""
+    try:
+        os.makedirs(os.path.dirname(session_path), exist_ok=True)
+        with open(session_path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, **session}, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def _ssl_context():
     """优先用 certifi 证书（requests 的证书包），失败则用系统默认"""
     try:
@@ -522,6 +551,10 @@ class App(tk.Tk):
         self.notes_path = ""       # 当前工作区的说明文件路径
         self.notes_data = {}       # 说明数据：键 -> 说明内容
         self._notes_warned = False
+        self.session_path = ""     # 当前工作区的会话状态文件路径
+        self.session_data = {}     # 上次会话数据（保留文件/置顶/隐藏）
+        self.closed_files = set()  # 被 × 掉的文件（参数保留在内存，可恢复）
+        self._scanned_all = []     # 本次扫描到的全部含参数文件
         self.unsaved_tag = "unsaved"
         self.ai_rec_tag = "ai_rec"
         self.ai_filtered_tag = "ai_filtered"
@@ -555,6 +588,8 @@ class App(tk.Tk):
         search_entry = ttk.Entry(row1, textvariable=self.search_var, width=18)
         search_entry.pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(row1, text="🔍 文件名：").pack(side=tk.RIGHT)
+        self.btn_restore = tk.Button(row1, text="↩ 恢复关闭文件", command=self.restore_closed_files)
+        self.btn_restore.pack(side=tk.RIGHT, padx=(0, 6))
         self.search_var.trace("w", lambda *a: self.apply_tab_filter())
 
         self.info_label = tk.Label(
@@ -640,7 +675,8 @@ class App(tk.Tk):
         tree.tag_configure(self.ai_filtered_tag, background="#f0f0f0", foreground="#999999")
 
     def on_close(self):
-        self.save_note()  # 保存尚在输入框中的说明
+        self.save_note()     # 保存尚在输入框中的说明
+        self.save_session()  # 保存会话状态，下次打开同一工作区可恢复
         generate_tune_log(self.param_map)
         self.destroy()
 
@@ -650,11 +686,13 @@ class App(tk.Tk):
             return
         self.last_folder = folder
         self.param_map, scanned_files = scan_folder(folder)
-        # 标签栏只显示"扫出参数"的文件；无参数的文件不显示（AI 识别本来也会跳过它们）
-        self.all_files = [fp for fp in scanned_files if self.param_map.get(fp)]
-        # 加载该工作区保存过的参数说明（集中存放在说明目录，按工作区路径区分）
+        # 本次扫描到的含参数文件（完整集合，关闭文件时可从中恢复）
+        self._scanned_all = [fp for fp in scanned_files if self.param_map.get(fp)]
+        # 加载该工作区的说明与会话状态（集中存放在说明目录，按工作区路径区分）
         self.notes_path = workspace_notes_path(folder)
+        self.session_path = workspace_session_path(folder)
         self.notes_data = load_notes(self.notes_path)
+        self.session_data = load_session(self.session_path)
         loaded = 0
         for fp, params in self.param_map.items():
             for p in params:
@@ -662,12 +700,41 @@ class App(tk.Tk):
                 if key in self.notes_data:
                     p["note_manual"] = self.notes_data[key]
                     loaded += 1
-        info = f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self.all_files)}"
+        # 恢复上次会话：已关闭的文件、置顶、隐藏
+        self.closed_files = set()
+        for rel in (self.session_data.get("closed") or []):
+            for fp in self._scanned_all:
+                if notes_param_key(fp, folder) == rel:
+                    self.closed_files.add(fp)
+                    break
+        prio_set = set(self.session_data.get("priority") or [])
+        hid_set = set(self.session_data.get("hidden") or [])
+        for fp, params in self.param_map.items():
+            base = notes_param_key(fp, folder)
+            for p in params:
+                key = base + "::" + p["name"]
+                if key in prio_set:
+                    p["is_priority"] = True
+                if key in hid_set:
+                    p["hidden"] = True
+        self.all_files = [fp for fp in self._scanned_all if fp not in self.closed_files]
+        info = f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self._scanned_all)}"
         if loaded:
             info += f" | 已载说明：{loaded} 条"
+        if self.closed_files or prio_set or hid_set:
+            info += " | 已恢复上次工作状态"
         self.info_label.config(text=info)
         self.rebuild_tabs()
-        if self.all_files:
+        # 恢复上次打开的文件
+        cur_rel = self.session_data.get("current") or ""
+        target = None
+        for fp in self.all_files:
+            if notes_param_key(fp, folder) == cur_rel:
+                target = fp
+                break
+        if target:
+            self.switch_file(target)
+        elif self.all_files:
             self.switch_file(self.all_files[0])
 
     def _tab_wheel(self, event):
@@ -762,8 +829,8 @@ class App(tk.Tk):
             self.tab_canvas.yview_moveto(0)
 
     def close_file_tab(self, fp):
-        """关闭文件标签：仅从当前列表移除，不改动磁盘文件"""
-        self.param_map.pop(fp, None)
+        """关闭文件标签：仅从当前列表移除，不改动磁盘文件（可用「恢复关闭文件」找回）"""
+        self.closed_files.add(fp)
         if fp in self.all_files:
             self.all_files.remove(fp)
         if self.current_file == fp:
@@ -786,6 +853,37 @@ class App(tk.Tk):
             holder.destroy()
         self._shown_files = list(self.tab_widgets.keys())
         self._layout_tabs()
+        self.save_session()
+
+    def save_session(self):
+        """保存会话状态（保留文件/置顶/隐藏/当前文件），下次打开同一工作区自动恢复"""
+        if not (self.last_folder and self.session_path):
+            return
+        root = self.last_folder
+        self.session_data = {
+            "closed": [notes_param_key(fp, root) for fp in self.closed_files],
+            "current": notes_param_key(self.current_file, root) if self.current_file else "",
+            "priority": [notes_param_key(fp, root) + "::" + p["name"]
+                         for fp, plist in self.param_map.items() for p in plist if p["is_priority"]],
+            "hidden": [notes_param_key(fp, root) + "::" + p["name"]
+                       for fp, plist in self.param_map.items() for p in plist if p["hidden"]],
+        }
+        save_session_file(self.session_path, self.session_data)
+
+    def restore_closed_files(self):
+        """把被 × 掉的文件重新加回标签栏"""
+        if not self.last_folder:
+            return
+        if not self.closed_files:
+            messagebox.showinfo("提示", "当前没有关闭过的文件")
+            return
+        self.closed_files = set()
+        self.all_files = [fp for fp in self._scanned_all if self.param_map.get(fp)]
+        self.rebuild_tabs()
+        if self.all_files and not self.current_file:
+            self.switch_file(self.all_files[0])
+        self.refresh_tables()
+        self.save_session()
 
     def switch_file(self, fp):
         self.current_file = fp
@@ -807,8 +905,9 @@ class App(tk.Tk):
 
         # 当前文件的参数
         params = self.param_map.get(self.current_file, [])
-        # 预调栏：所有文件中已置顶的参数（切换文件时保留显示）
-        prio_params = [p for plist in self.param_map.values() for p in plist if p["is_priority"]]
+        # 预调栏：所有未关闭文件中已置顶的参数（切换文件时保留显示）
+        prio_params = [p for fp, plist in self.param_map.items() if fp not in self.closed_files
+                       for p in plist if p["is_priority"]]
 
         if not params and not prio_params:
             self.btn_save_all.config(state=tk.DISABLED)
@@ -876,6 +975,7 @@ class App(tk.Tk):
         if col == "#6":
             p["is_priority"] = not is_priority_tree
             self.refresh_tables()
+            self.save_session()
             return
 
         # 处理×按钮（区分预调栏和参数列表）
@@ -887,6 +987,7 @@ class App(tk.Tk):
                 # 参数列表×：隐藏参数
                 p["hidden"] = True
             self.refresh_tables()
+            self.save_session()
             return
 
     def on_tree_select(self, event):
@@ -991,7 +1092,7 @@ class App(tk.Tk):
                 "  \"deepseek_api_key\": \"\"   ← 在这里填 Key")
             return
 
-        files = [fp for fp in self.param_map if self.param_map[fp]]
+        files = [fp for fp in self.param_map if self.param_map[fp] and fp not in self.closed_files]
         if not files:
             messagebox.showinfo("提示", "请先选择文件夹（没有扫描到含参数的文件）")
             return
@@ -1161,6 +1262,7 @@ class App(tk.Tk):
                     p["is_priority"] = True
                     count += 1
         self.refresh_tables()
+        self.save_session()
         if count:
             messagebox.showinfo("提示", f"已把 {count} 个 AI 推荐参数加入预调栏")
         else:
