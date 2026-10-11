@@ -637,6 +637,8 @@ class App(tk.Tk):
         self.tab_canvas.bind("<Configure>", self._on_tab_resize)
         self.tab_widgets = {}  # 文件路径 -> 标签控件
         self.tab_buttons = {}  # 文件路径 -> 标签按钮（用于高亮当前文件）
+        self.tab_groups = {}   # 分组名 -> 标题控件（文件多时按类型分组）
+        self.expanded_groups = set()  # 已展开的分组（默认折叠）
 
         # 双栏面板
         paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6)
@@ -726,6 +728,7 @@ class App(tk.Tk):
                     loaded += 1
         # 恢复上次会话：已关闭的文件、置顶、隐藏
         self.closed_files = set()
+        self.expanded_groups = set()  # 分组默认折叠
         for rel in (self.session_data.get("closed") or []):
             for fp in self._scanned_all:
                 if notes_param_key(fp, folder) == rel:
@@ -793,33 +796,88 @@ class App(tk.Tk):
                 btn.config(bg="#f0f0f0", fg="#000000",
                            activebackground="#e6e6e6", activeforeground="#000000")
 
+    def _create_tab(self, fp):
+        """创建单个文件标签（右上角 × 可关闭）"""
+        fn = os.path.basename(fp)
+        holder = tk.Frame(self.tab_inner, bg="#eee")
+        btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
+                        command=lambda p=fp: self.switch_file(p))
+        btn.pack()
+        close = tk.Label(holder, text="×", fg="#999999", bg="#e2e2e2",
+                         cursor="hand2", font=("", 8, "bold"))
+        close.place(relx=1.0, rely=0.0, anchor="ne")
+        close.bind("<Button-1>", lambda e, p=fp: self.close_file_tab(p))
+        close.bind("<Enter>", lambda e, w=close: w.config(fg="#d32f2f"))
+        close.bind("<Leave>", lambda e, w=close: w.config(fg="#999999"))
+        for w in (holder, btn, close):
+            w.bind("<MouseWheel>", self._tab_wheel)
+        self.tab_widgets[fp] = holder
+        self.tab_buttons[fp] = btn
+
     def rebuild_tabs(self):
-        """重新创建文件标签（选文件夹/搜索过滤时调用）"""
+        """重新创建文件标签（选文件夹/搜索过滤时调用；文件多时按类型分组）"""
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
         self.tab_widgets = {}
         self.tab_buttons = {}
-        # 创建文件标签（右上角 × 可关闭）
-        for fp in self._filtered_files():
-            fn = os.path.basename(fp)
-            holder = tk.Frame(self.tab_inner, bg="#eee")
-            btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
-                            command=lambda p=fp: self.switch_file(p))
-            btn.pack()
-            close = tk.Label(holder, text="×", fg="#999999", bg="#e2e2e2",
-                             cursor="hand2", font=("", 8, "bold"))
-            close.place(relx=1.0, rely=0.0, anchor="ne")
-            close.bind("<Button-1>", lambda e, p=fp: self.close_file_tab(p))
-            close.bind("<Enter>", lambda e, w=close: w.config(fg="#d32f2f"))
-            close.bind("<Leave>", lambda e, w=close: w.config(fg="#999999"))
-            for w in (holder, btn, close):
-                w.bind("<MouseWheel>", self._tab_wheel)
-            self.tab_widgets[fp] = holder
-            self.tab_buttons[fp] = btn
+        self.tab_groups = {}
+
+        files = self._filtered_files()
+        kw = self.search_var.get().strip()
+        # 搜索时平铺显示匹配结果；否则文件多时按类型分组（>10 个的类型各自成组）
+        groups = [] if kw else group_files(files)
+        if groups:
+            for gname, gfiles in groups:
+                collapsed = gname not in self.expanded_groups
+                arrow = "▸" if collapsed else "▾"
+                header = tk.Label(self.tab_inner, text=f"📁 {gname}（{len(gfiles)} 个）{arrow}",
+                                  bg="#dce6f5", fg="#33475b", padx=6, pady=2,
+                                  font=("", 9, "bold"), cursor="hand2")
+                header.bind("<Button-1>", lambda e, g=gname: self.toggle_group(g))
+                header.bind("<MouseWheel>", self._tab_wheel)
+                self.tab_groups[gname] = header
+                if not collapsed:
+                    for fp in gfiles:
+                        self._create_tab(fp)
+        else:
+            for fp in files:
+                self._create_tab(fp)
         self._shown_files = list(self.tab_widgets.keys())
         self._layout_tabs(reset_scroll=True)
         self._highlight_current_tab()
+
+    def toggle_group(self, gname):
+        """折叠/展开一个文件分组"""
+        if gname in self.expanded_groups:
+            self.expanded_groups.discard(gname)
+        else:
+            self.expanded_groups.add(gname)
+        self.rebuild_tabs()
+
+    def _layout_units(self):
+        """标签栏当前的显示顺序（分组标题 + 文件标签，按分组/折叠状态）"""
+        files = self._filtered_files()
+        kw = self.search_var.get().strip()
+        groups = [] if kw else group_files(files)
+        units = []
+        if groups:
+            for gname, gfiles in groups:
+                header = self.tab_groups.get(gname)
+                if header is not None:
+                    units.append(header)
+                if gname not in self.expanded_groups:
+                    continue
+                for fp in gfiles:
+                    holder = self.tab_widgets.get(fp)
+                    if holder is not None:
+                        units.append(holder)
+        else:
+            for fp in files:
+                holder = self.tab_widgets.get(fp)
+                if holder is not None:
+                    units.append(holder)
+        return units
 
     def _layout_tabs(self, reset_scroll=False):
         """把文件标签按容器宽度排成多行，高度超出部分垂直滚动（不重建控件，速度快）"""
@@ -830,16 +888,13 @@ class App(tk.Tk):
 
         cur_x = row_y = row_h = 0
         total_h = 0
-        for fp in self.all_files:
-            holder = self.tab_widgets.get(fp)
-            if holder is None:
-                continue
-            w = holder.winfo_reqwidth()
-            h = holder.winfo_reqheight()
+        for wdg in self._layout_units():
+            w = wdg.winfo_reqwidth()
+            h = wdg.winfo_reqheight()
             if cur_x > 0 and cur_x + w > canvas_w - 4:
                 row_y += row_h + 4
                 cur_x = row_h = 0
-            holder.place(x=cur_x, y=row_y)
+            wdg.place(x=cur_x, y=row_y)
             cur_x += w + 6
             row_h = max(row_h, h)
             total_h = row_y + row_h
@@ -870,13 +925,17 @@ class App(tk.Tk):
         else:
             # 预调栏是跨文件的，被关文件的置顶参数需要从预调栏移除
             self.refresh_tables()
-        # 只销毁被关闭的标签控件，不重建全部（避免文件多时卡顿）
-        holder = self.tab_widgets.pop(fp, None)
-        self.tab_buttons.pop(fp, None)
-        if holder:
-            holder.destroy()
-        self._shown_files = list(self.tab_widgets.keys())
-        self._layout_tabs()
+        if self.tab_groups:
+            # 分组视图：整体重建以刷新分组数量
+            self.rebuild_tabs()
+        else:
+            # 只销毁被关闭的标签控件，不重建全部（避免文件多时卡顿）
+            holder = self.tab_widgets.pop(fp, None)
+            self.tab_buttons.pop(fp, None)
+            if holder:
+                holder.destroy()
+            self._shown_files = list(self.tab_widgets.keys())
+            self._layout_tabs()
         self.save_session()
 
     def save_session(self):
