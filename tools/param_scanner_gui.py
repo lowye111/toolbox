@@ -463,11 +463,14 @@ def generate_tune_log(param_map, quiet=False):
 # ==================== AI 识别（DeepSeek） ====================
 
 def get_ai_settings():
-    """从 config.json 读取 API Key 和模型名"""
+    """读取 API Key 与模型名。
+
+    Key 的来源优先级（见 env_check）：环境变量 DEEPSEEK_API_KEY > config.json 密文 > 明文。
+    """
     key, model = "", "deepseek-flash"
     if env_check:
         cfg = env_check.load_config()
-        key = (cfg.get("deepseek_api_key") or "").strip()
+        key = env_check.get_api_key(cfg)
         model = (cfg.get("deepseek_model") or "deepseek-flash").strip()
     return key, model
 
@@ -628,7 +631,7 @@ def call_deepseek(file_text, candidates_text, api_key, model):
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            raise RuntimeError("API Key 无效（401），请检查 config.json 里的 deepseek_api_key")
+            raise RuntimeError("API Key 无效（401），请检查环境变量 DEEPSEEK_API_KEY 或 config.json 中的 Key")
         detail = ""
         try:
             detail = e.read().decode("utf-8", "ignore")[:200]
@@ -773,7 +776,7 @@ class App(tk.Tk):
 
         self.info_label = tk.Label(
             top_frame,
-            text="未选择文件夹 | 支持 .h/.c/.cpp/.yaml/.ini 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
+            text="未选择文件夹 | 支持 .h/.c/.cpp/.yaml/.ini 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需配置环境变量 DEEPSEEK_API_KEY（或 config.json）",
             anchor="w", bg=c["bg"], fg=c["text_muted"], font=ui_theme.ui_font(9))
         self.info_label.pack(fill=tk.X, pady=(6, 0))
 
@@ -1350,9 +1353,13 @@ class App(tk.Tk):
             ensure_key_field()
             messagebox.showinfo(
                 "需要 API Key",
-                "未配置 DeepSeek API Key。\n\n"
-                "已把配置项写入根目录 config.json，请填写后重试：\n"
-                "  \"deepseek_api_key\": \"\"   ← 在这里填 Key")
+                "未配置 DeepSeek API Key。推荐用环境变量（不落盘、不会被误提交）：\n\n"
+                "  1) 在当前用户下执行一次：\n"
+                "     setx DEEPSEEK_API_KEY \"sk-你的Key\"\n"
+                "     然后重新打开本工具即可生效。\n\n"
+                "  2) 或者写进根目录 config.json 的 \"deepseek_api_key\" 字段，\n"
+                "     工具会在首次读取时自动加密成 \"deepseek_api_key_enc\"，\n"
+                "     密文绑定本机 Windows 账户，换机器无法解密。")
             return
 
         files = [fp for fp in self.param_map if self.param_map[fp] and fp not in self.closed_files]

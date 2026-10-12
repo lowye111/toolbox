@@ -1,0 +1,99 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""提交前拦截：阻止把 API Key 等敏感信息提交进仓库。
+
+安装在 .git/hooks/pre-commit（可由 tools/install_hooks.py 或手动安装）。
+检查对象是 **暂存区实际内容**，所以无论 Key 出现在源码、README、配置还是
+提交信息里，都会被拦下。
+
+若确实需要放行（例如提交测试用的假 Key），可用：
+    git commit --no-verify
+"""
+import re
+import subprocess
+import sys
+
+# 需要拦截的模式（顺序即提示优先级）
+RULES = [
+    ("DeepSeek/OpenAI 风格的 API Key",
+     re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b")),
+    ("疑似明文赋值的 api_key",
+     re.compile(r"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token)\b\s*[:=]\s*[\"']([^\"'\s]{16,})[\"']")),
+    ("私钥文件内容",
+     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("GitHub token",
+     re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,})\b")),
+]
+
+# 这些路径不检查（示例/模板文件里的占位符）
+SKIP_PATH_RE = re.compile(r"(?i)(\.example$|\.sample$|\.template$|requirements.*\.txt$)")
+
+# 允许的占位值（明显不是真 Key）
+PLACEHOLDER_RE = re.compile(r"(?i)(your[_-]?key|xxx+|placeholder|example|<.*>|\.\.\.|sk-xxx)")
+
+
+def staged_files():
+    out = subprocess.run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
+                         capture_output=True)
+    return [f for f in out.stdout.decode("utf-8", "ignore").splitlines() if f.strip()]
+
+
+def staged_blob(path):
+    """取暂存区里该文件的内容（而不是工作区，避免被改回来绕过）"""
+    out = subprocess.run(["git", "show", ":" + path], capture_output=True)
+    if out.returncode != 0:
+        return ""
+    return out.stdout.decode("utf-8", "ignore")
+
+
+def main():
+    problems = []
+    for path in staged_files():
+        if SKIP_PATH_RE.search(path):
+            continue
+        content = staged_blob(path)
+        if not content:
+            continue
+        for lineno, line in enumerate(content.splitlines(), 1):
+            for label, pattern in RULES:
+                for m in pattern.finditer(line):
+                    matched = m.group(0)
+                    if PLACEHOLDER_RE.search(matched):
+                        continue
+                    # 密文（DPAPI base64）不算泄露：它绑定本机账户，换机器无效
+                    if "deepseek_api_key_enc" in line:
+                        continue
+                    problems.append((path, lineno, label, matched[:60]))
+
+    # 提交信息也检查（防止把 Key 写进 commit message）
+    msg_path = ".git/COMMIT_EDITMSG"
+    try:
+        with open(msg_path, "r", encoding="utf-8", errors="ignore") as f:
+            for lineno, line in enumerate(f.read().splitlines(), 1):
+                for label, pattern in RULES:
+                    for m in pattern.finditer(line):
+                        if PLACEHOLDER_RE.search(m.group(0)):
+                            continue
+                        problems.append(("(commit message)", lineno, label, m.group(0)[:60]))
+    except OSError:
+        pass
+
+    if not problems:
+        return 0
+
+    print("=" * 64, file=sys.stderr)
+    print("提交被拦截：检测到可能的敏感信息", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    for path, lineno, label, sample in problems:
+        print(f"  {path}:{lineno}  [{label}]  {sample}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("建议的处理方式：", file=sys.stderr)
+    print("  1) 改用环境变量：setx DEEPSEEK_API_KEY \"sk-...\"", file=sys.stderr)
+    print("  2) 若 Key 确实已泄露，请立刻去服务商后台轮换该 Key", file=sys.stderr)
+    print("  3) 确认是误报时可跳过检查：git commit --no-verify", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

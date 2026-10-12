@@ -23,9 +23,36 @@ my toolbox for yolo learner
 | conda_env | 训练环境名（默认 yolov5） |
 | env_python | 直接指定训练环境的 python.exe 路径（优先级最高） |
 | yolov5_dir | yolov5 仓库目录 |
-| deepseek_api_key | 参数扫描工具「AI 识别」用的 DeepSeek API Key（可选） |
+| deepseek_api_key | 参数扫描工具「AI 识别」用的 DeepSeek API Key（可选，建议改用环境变量，见下） |
+| deepseek_api_key_enc | 由工具自动生成的加密 Key（不要手填） |
 | deepseek_model | AI 识别模型名，默认 deepseek-flash（可选 deepseek-v4-pro） |
 | notes_dir | 参数扫描工具「说明」文件的保存目录（默认 toolbox/notes） |
+
+## API Key 怎么放才安全
+
+「AI 识别」需要一个 DeepSeek API Key。工具按下面的顺序取用，**越靠前越安全**：
+
+1. **环境变量（推荐，Key 完全不落盘、也不会被误提交）**
+
+   在 PowerShell 里执行一次（之后新开的终端都生效）：
+   ```powershell
+   setx DEEPSEEK_API_KEY "sk-你的Key"
+   ```
+
+2. **config.json 密文**：把 Key 填进 `deepseek_api_key` 字段，工具首次读取时会**自动加密**成
+   `deepseek_api_key_enc` 并清空明文字段。加密用的是 Windows DPAPI——密钥由当前 Windows
+   账户托管，**密文拷到别的电脑/别的账户无法解密**，所以即使 config.json 被提交或分享也不泄露。
+
+3. **明文**：仅为兼容旧配置保留，读到时会自动迁移成密文。
+
+另外仓库内置了一个提交前检查（`tools/git-hooks/pre-commit`），会在 `git commit` 时扫描
+**暂存区内容与提交信息**，发现疑似 Key 就直接阻断提交。新克隆的仓库需要装一次：
+
+```powershell
+python tools/install_hooks.py
+```
+
+（git 不会自动分发钩子，所以换机器要重新装。）
 
 ## 工具列表
 
@@ -38,7 +65,7 @@ my toolbox for yolo learner
   - 双栏管理：预调栏（置顶常用参数）+ 参数列表
   - 一键置顶、隐藏参数（顶部「显示隐藏项」可找回）
   - 支持单条/批量保存，保存前留 `.bak` 备份，按原编码与行尾写回；关闭时生成修改日志
-  - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数（需在 config.json 填写 deepseek_api_key）
+  - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数（需配置 API Key，见上文「API Key 怎么放才安全」）
   - 📝 手动说明：为参数添加备注，集中保存（默认 toolbox/notes，可用 config.json 的 notes_dir 指定），重开同一工作区自动加载
 
 ### 2️⃣ 文件批量重命名 (change_name.py)

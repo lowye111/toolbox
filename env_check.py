@@ -5,22 +5,150 @@
 - 自动检测 conda 训练环境（模型训练工具用）与 yolov5 仓库目录
 - 读写根目录 config.json（首次运行自动生成，不纳入 git）
 """
+import base64
+import ctypes
 import importlib.util
 import json
 import os
 import subprocess
 import sys
 import time
+from ctypes import wintypes
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 
+# ==================== API Key 保护 ====================
+# 目的：即使 config.json 被误提交/误分享，里面的 Key 也不能被别人直接拿去用。
+#
+# 优先级（高 → 低）：
+#   1. 环境变量 DEEPSEEK_API_KEY   —— 推荐；Key 完全不落盘
+#   2. config.json 中的密文 *_enc  —— 用 Windows DPAPI 加密，绑定当前 Windows 账户
+#   3. config.json 中的明文（旧格式）—— 仍可读，但首次保存会自动迁移成密文
+#
+# 关键点：DPAPI 的密钥由 Windows 用当前用户账户托管，密文拷到别的机器/别的账户
+# 无法解密。因此这不是"把密钥和密文放一起"的假加密。
+ENV_API_KEY = "DEEPSEEK_API_KEY"
+ENC_FIELD = "deepseek_api_key_enc"   # config.json 里保存密文的字段
+_DPAPI_ENTROPY = b"toolbox/deepseek-api-key/v1"   # 用途绑定，别的程序拿到密文也解不开
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _dpapi_libs():
+    """按需加载 crypt32/kernel32（仅 Windows 有），失败返回 None"""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        crypt32.CryptProtectData.argtypes = [
+            ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)]
+        crypt32.CryptProtectData.restype = wintypes.BOOL
+        crypt32.CryptUnprotectData.argtypes = [
+            ctypes.POINTER(_DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(_DATA_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)]
+        crypt32.CryptUnprotectData.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        return crypt32, kernel32
+    except Exception:
+        return None
+
+
+def _blob(data):
+    buf = ctypes.create_string_buffer(data, len(data))
+    return _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte))), buf
+
+
+def _blob_bytes(blob):
+    return ctypes.string_at(blob.pbData, blob.cbData)
+
+
+def encrypt_secret(text):
+    """用 Windows DPAPI 加密，返回 base64 字符串；不可用时返回 None"""
+    libs = _dpapi_libs()
+    if not libs or not text:
+        return None
+    crypt32, kernel32 = libs
+    try:
+        blob_in, _k1 = _blob(text.encode("utf-8"))
+        blob_ent, _k2 = _blob(_DPAPI_ENTROPY)
+        blob_out = _DATA_BLOB()
+        ok = crypt32.CryptProtectData(ctypes.byref(blob_in), "toolbox", ctypes.byref(blob_ent),
+                                      None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            return None
+        try:
+            return base64.b64encode(_blob_bytes(blob_out)).decode("ascii")
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+    except Exception:
+        return None
+
+
+def decrypt_secret(token):
+    """解密 encrypt_secret 的产物；失败（换机器/换账户/被篡改）返回 None"""
+    libs = _dpapi_libs()
+    if not libs or not token:
+        return None
+    crypt32, kernel32 = libs
+    try:
+        blob_in, _k1 = _blob(base64.b64decode(token))
+        blob_ent, _k2 = _blob(_DPAPI_ENTROPY)
+        blob_out = _DATA_BLOB()
+        ok = crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, ctypes.byref(blob_ent),
+                                       None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            return None
+        try:
+            return _blob_bytes(blob_out).decode("utf-8")
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+    except Exception:
+        return None
+
+
+def protect_config_secret(config):
+    """把 config 里的明文 deepseek_api_key 转成密文 *_enc，返回是否有改动。
+
+    仅在本机支持 DPAPI 且确实存在明文时改写；转换成功后删除明文字段。
+    """
+    plain = (config.get("deepseek_api_key") or "").strip()
+    if not plain:
+        return False
+    token = encrypt_secret(plain)
+    if not token:
+        return False          # 无法加密就保留明文，不破坏可用性
+    config[ENC_FIELD] = token
+    config["deepseek_api_key"] = ""
+    return True
+
+
+def get_api_key(config=None):
+    """按 环境变量 → 密文 → 明文 的顺序取 API Key（返回空串表示未配置）"""
+    env_key = (os.environ.get(ENV_API_KEY) or "").strip()
+    if env_key:
+        return env_key
+    cfg = config if config is not None else load_config()
+    token = (cfg.get(ENC_FIELD) or "").strip()
+    if token:
+        decrypted = decrypt_secret(token)
+        if decrypted:
+            return decrypted.strip()
+    return (cfg.get("deepseek_api_key") or "").strip()
+
 DEFAULT_CONFIG = {
     "conda_env": "yolov5",  # 模型训练使用的 conda 环境名
     "env_python": "",       # 可选：直接指定该环境的 python.exe 路径（优先级最高）
     "yolov5_dir": "",       # 可选：yolov5 仓库目录（使用 yolov5 系列模型训练/测试时）
-    "deepseek_api_key": "",              # 可选：参数扫描工具 AI 识别用的 DeepSeek API Key
+    "deepseek_api_key": "",              # 已废弃的明文字段；请改用环境变量 DEEPSEEK_API_KEY
+    "deepseek_api_key_enc": "",          # 加密后的 API Key（由工具自动生成，绑定本机 Windows 账户）
     "deepseek_model": "deepseek-flash",  # 可选：DeepSeek 模型名（官方列表：deepseek-flash / deepseek-v4-pro）
     "notes_dir": "",                     # 可选：参数扫描工具说明文件的保存目录（留空=工具目录下 notes 文件夹）
 }
@@ -63,6 +191,12 @@ def load_config():
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 config.update(json.load(f))
+            # 老版本留下的明文 Key：读到时顺手迁移成密文，避免明文长期留在磁盘上
+            if (config.get("deepseek_api_key") or "").strip() and not (config.get(ENC_FIELD) or "").strip():
+                migrated = dict(config)
+                if protect_config_secret(migrated):
+                    save_config(migrated)
+                    config = migrated
         else:
             save_config(config)
     except Exception:
@@ -74,8 +208,13 @@ def load_config():
 
 
 def save_config(config):
-    """保存 config.json（成功后让配置缓存失效）"""
+    """保存 config.json（成功后让配置缓存失效）
+
+    保存前会尝试把明文 API Key 加密成密文，避免明文落在磁盘上。
+    """
     try:
+        config = dict(config)
+        protect_config_secret(config)   # 明文 -> 密文（不可加密时保持原样）
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception:
