@@ -1,16 +1,21 @@
 import cv2
+import glob
 import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ui_theme
 
 
 class VideoFrameExtractorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("视频抽帧工具")
-        self.root.geometry("1100x820")
-        self.root.minsize(980, 720)
+        self.root.geometry("1100x940")
+        self.root.minsize(980, 740)
         self.root.resizable(True, True)
 
         self.video_path = tk.StringVar()
@@ -29,35 +34,37 @@ class VideoFrameExtractorGUI:
         }
 
         self.is_extracting = False
+        self._cancel_flag = False
+        # 关窗标志：置位后抽帧线程不再回调 UI，避免对已销毁的窗口调用 after 抛 TclError
+        self._closing = False
+        # 记录上一次“自动生成”的默认输出目录，用于判断用户是否手工改过输出目录
+        self._auto_output_dir = ""
 
         self._setup_style()
         self._create_widgets()
 
-    def _setup_style(self):
-        default_font = ("SimHei", 11)
-        title_font = ("SimHei", 12, "bold")
-        big_btn_font = ("SimHei", 12, "bold")
+        # 关窗时先通知抽帧线程停止
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        style = ttk.Style(self.root)
-        style.configure(".", font=default_font)
-        style.configure("TLabelframe.Label", font=title_font)
-        style.configure("Accent.TButton", font=big_btn_font)
-        style.configure("Info.TLabel", font=("SimHei", 11), foreground="#1f1f1f")
-        style.configure("Tip.TLabel", font=("SimHei", 10), foreground="gray")
+        ui_theme.center(self.root, 1100, 940, min_w=980, min_h=740)
+
+    def _setup_style(self):
+        ui_theme.apply(self.root)
 
     def _create_widgets(self):
         self.root.grid_rowconfigure(5, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
         # ===== 顶部标题 =====
-        title_frame = ttk.Frame(self.root, padding=(20, 15))
+        title_frame = ttk.Frame(self.root, padding=(20, 8))
         title_frame.grid(row=0, column=0, sticky="ew")
         title_frame.grid_columnconfigure(0, weight=1)
 
         ttk.Label(
             title_frame,
             text="视频抽帧工具",
-            font=("SimHei", 18, "bold")
+            font=ui_theme.ui_font(18, True),
+            foreground=ui_theme.COLORS["primary"]
         ).grid(row=0, column=0, sticky="w", pady=(0, 5))
 
         ttk.Label(
@@ -67,23 +74,23 @@ class VideoFrameExtractorGUI:
         ).grid(row=1, column=0, sticky="w")
 
         # ===== 视频文件选择 =====
-        frame_video = ttk.LabelFrame(self.root, text="视频文件选择", padding=(15, 12))
-        frame_video.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
+        frame_video = ttk.LabelFrame(self.root, text="视频文件选择", padding=(15, 8))
+        frame_video.grid(row=1, column=0, sticky="ew", padx=20, pady=6)
         frame_video.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(frame_video, text="视频路径：").grid(row=0, column=0, padx=5, pady=8, sticky="w")
+        ttk.Label(frame_video, text="视频路径：").grid(row=0, column=0, padx=5, pady=4, sticky="w")
         self.entry_video = ttk.Entry(frame_video, textvariable=self.video_path)
-        self.entry_video.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
+        self.entry_video.grid(row=0, column=1, padx=5, pady=4, sticky="ew")
 
         self.btn_video_browse = ttk.Button(frame_video, text="浏览", command=self._select_video, width=10)
-        self.btn_video_browse.grid(row=0, column=2, padx=5, pady=8)
+        self.btn_video_browse.grid(row=0, column=2, padx=5, pady=4)
 
         self.btn_parse = ttk.Button(frame_video, text="解析视频信息", command=self._parse_video_info, width=14)
-        self.btn_parse.grid(row=1, column=1, padx=5, pady=8, sticky="w")
+        self.btn_parse.grid(row=1, column=1, padx=5, pady=4, sticky="w")
 
         # ===== 视频信息 =====
-        frame_info = ttk.LabelFrame(self.root, text="视频基本信息", padding=(15, 12))
-        frame_info.grid(row=2, column=0, sticky="ew", padx=20, pady=10)
+        frame_info = ttk.LabelFrame(self.root, text="视频基本信息", padding=(15, 8))
+        frame_info.grid(row=2, column=0, sticky="ew", padx=20, pady=6)
         frame_info.grid_columnconfigure(0, weight=1)
 
         self.info_label = ttk.Label(
@@ -93,15 +100,15 @@ class VideoFrameExtractorGUI:
             wraplength=1000,
             justify="left"
         )
-        self.info_label.grid(row=0, column=0, padx=5, pady=8, sticky="w")
+        self.info_label.grid(row=0, column=0, padx=5, pady=4, sticky="w")
 
         # ===== 抽帧模式 =====
-        frame_mode = ttk.LabelFrame(self.root, text="抽帧模式设置", padding=(15, 12))
-        frame_mode.grid(row=3, column=0, sticky="ew", padx=20, pady=10)
+        frame_mode = ttk.LabelFrame(self.root, text="抽帧模式设置", padding=(15, 8))
+        frame_mode.grid(row=3, column=0, sticky="ew", padx=20, pady=6)
         frame_mode.grid_columnconfigure(0, weight=1)
 
         radio_frame = ttk.Frame(frame_mode)
-        radio_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        radio_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         radio_frame.grid_columnconfigure(0, weight=1)
 
         ttk.Radiobutton(
@@ -110,7 +117,7 @@ class VideoFrameExtractorGUI:
             variable=self.extract_mode,
             value="interval",
             command=self._switch_mode
-        ).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        ).grid(row=0, column=0, padx=10, pady=4, sticky="w")
 
         ttk.Radiobutton(
             radio_frame,
@@ -118,7 +125,7 @@ class VideoFrameExtractorGUI:
             variable=self.extract_mode,
             value="time",
             command=self._switch_mode
-        ).grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        ).grid(row=1, column=0, padx=10, pady=4, sticky="w")
 
         ttk.Radiobutton(
             radio_frame,
@@ -126,7 +133,7 @@ class VideoFrameExtractorGUI:
             variable=self.extract_mode,
             value="specific",
             command=self._switch_mode
-        ).grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        ).grid(row=2, column=0, padx=10, pady=4, sticky="w")
 
         self.mode_frame = ttk.Frame(frame_mode)
         self.mode_frame.grid(row=1, column=0, sticky="ew")
@@ -135,19 +142,19 @@ class VideoFrameExtractorGUI:
         self._switch_mode()
 
         # ===== 输出目录 =====
-        frame_output = ttk.LabelFrame(self.root, text="输出路径设置", padding=(15, 12))
-        frame_output.grid(row=4, column=0, sticky="ew", padx=20, pady=10)
+        frame_output = ttk.LabelFrame(self.root, text="输出路径设置", padding=(15, 8))
+        frame_output.grid(row=4, column=0, sticky="ew", padx=20, pady=6)
         frame_output.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(frame_output, text="输出目录：").grid(row=0, column=0, padx=5, pady=8, sticky="w")
+        ttk.Label(frame_output, text="输出目录：").grid(row=0, column=0, padx=5, pady=4, sticky="w")
         self.entry_output = ttk.Entry(frame_output, textvariable=self.output_dir)
-        self.entry_output.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
+        self.entry_output.grid(row=0, column=1, padx=5, pady=4, sticky="ew")
 
         self.btn_output_browse = ttk.Button(frame_output, text="浏览", command=self._select_output_dir, width=10)
-        self.btn_output_browse.grid(row=0, column=2, padx=5, pady=8)
+        self.btn_output_browse.grid(row=0, column=2, padx=5, pady=4)
 
         self.btn_auto_output = ttk.Button(frame_output, text="自动生成", command=self._auto_fill_output_dir, width=10)
-        self.btn_auto_output.grid(row=0, column=3, padx=5, pady=8)
+        self.btn_auto_output.grid(row=0, column=3, padx=5, pady=4)
 
         # ===== 控制区 =====
         frame_control = ttk.Frame(self.root, padding=(20, 10))
@@ -156,31 +163,43 @@ class VideoFrameExtractorGUI:
         frame_control.grid_rowconfigure(2, weight=1)
 
         btn_area = ttk.Frame(frame_control)
-        btn_area.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        btn_area.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         btn_area.grid_columnconfigure(0, weight=1)
 
+        btn_row = ttk.Frame(btn_area)
+        btn_row.grid(row=0, column=0, pady=4)
+
         self.btn_extract = ttk.Button(
-            btn_area,
+            btn_row,
             text="开始抽帧",
             command=self._start_extract,
             style="Accent.TButton",
             width=22
         )
-        self.btn_extract.grid(row=0, column=0, pady=8)
+        self.btn_extract.grid(row=0, column=0)
+
+        self.btn_cancel = ttk.Button(
+            btn_row,
+            text="取消",
+            command=self._cancel_extract,
+            width=12,
+            state="disabled"
+        )
+        self.btn_cancel.grid(row=0, column=1, padx=(10, 0))
 
         # 进度条
-        progress_frame = ttk.LabelFrame(frame_control, text="处理进度", padding=(15, 12))
-        progress_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        progress_frame = ttk.LabelFrame(frame_control, text="处理进度", padding=(15, 8))
+        progress_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         progress_frame.grid_columnconfigure(0, weight=1)
 
         self.progress = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=5, pady=8)
+        self.progress.grid(row=0, column=0, sticky="ew", padx=5, pady=4)
 
         self.progress_label = ttk.Label(progress_frame, text="等待开始...", style="Tip.TLabel")
         self.progress_label.grid(row=1, column=0, sticky="w", padx=5)
 
         # 日志区
-        log_frame = ttk.LabelFrame(frame_control, text="运行日志", padding=(15, 12))
+        log_frame = ttk.LabelFrame(frame_control, text="运行日志", padding=(15, 8))
         log_frame.grid(row=2, column=0, sticky="nsew")
         log_frame.grid_columnconfigure(0, weight=1)
         log_frame.grid_rowconfigure(0, weight=1)
@@ -189,10 +208,9 @@ class VideoFrameExtractorGUI:
             log_frame,
             height=12,
             wrap="word",
-            font=("Consolas", 10),
-            padx=8,
-            pady=8
+            font=ui_theme.mono_font(10)
         )
+        ui_theme.style_text(self.log_text)
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
@@ -206,6 +224,16 @@ class VideoFrameExtractorGUI:
         self.log_text.see("end")
         self.root.update_idletasks()
 
+    def _ui_call(self, func):
+        """从抽帧线程安全地回到 UI 线程；窗口已关闭时直接丢弃回调。"""
+        if self._closing:
+            return
+        try:
+            self.root.after(0, func)
+        except tk.TclError:
+            # 窗口正在销毁，忽略即可，不影响抽帧线程收尾
+            self._closing = True
+
     def _set_extracting_state(self, extracting):
         self.is_extracting = extracting
         state = "disabled" if extracting else "normal"
@@ -217,6 +245,23 @@ class VideoFrameExtractorGUI:
         self.btn_extract.config(state=state)
         self.entry_video.config(state=state)
         self.entry_output.config(state=state)
+        # 抽帧中才能点“取消”
+        self.btn_cancel.config(state="normal" if extracting else "disabled")
+
+    def _cancel_extract(self):
+        if not self.is_extracting:
+            return
+        self._cancel_flag = True
+        self.btn_cancel.config(state="disabled")
+        self.progress_label.config(text="正在取消，请稍候...")
+        self._log("已请求取消抽帧，等待当前帧处理完成后停止...")
+
+    def _on_close(self):
+        # 关窗前先置位取消/关窗标志，避免抽帧线程继续写文件或回调已销毁的窗口
+        self._closing = True
+        if self.is_extracting:
+            self._cancel_flag = True
+        self.root.destroy()
 
     def _select_video(self):
         file_path = filedialog.askopenfilename(
@@ -227,11 +272,16 @@ class VideoFrameExtractorGUI:
             ]
         )
         if file_path:
+            # 判断当前输出目录是否仍是上一个视频“自动生成”的默认值
+            current_output = self.output_dir.get().strip()
+            is_auto_default = bool(self._auto_output_dir) and current_output == self._auto_output_dir
+
             self.video_path.set(file_path)
             self._log(f"已选择视频：{file_path}")
 
-            # 自动填充默认输出目录
-            if not self.output_dir.get().strip():
+            # 自动填充默认输出目录：输出目录为空，或仍等于上一个视频的自动默认值
+            # （说明用户没手工填过），则跟随新视频更新
+            if not current_output or is_auto_default:
                 self._auto_fill_output_dir()
 
     def _select_output_dir(self):
@@ -250,6 +300,8 @@ class VideoFrameExtractorGUI:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         auto_dir = os.path.join(base_dir, f"{video_name}_frames")
         self.output_dir.set(auto_dir)
+        # 记住这个自动生成的默认值，供 _select_video 判断是否跟随新视频更新
+        self._auto_output_dir = auto_dir
         self._log(f"已自动生成输出目录：{auto_dir}")
 
     def _read_video_info(self, video_path):
@@ -311,10 +363,10 @@ class VideoFrameExtractorGUI:
 
         if mode == "interval":
             ttk.Label(self.mode_frame, text="抽帧间隔（帧数）：").grid(
-                row=0, column=0, padx=5, pady=8, sticky="w"
+                row=0, column=0, padx=5, pady=4, sticky="w"
             )
             ttk.Entry(self.mode_frame, textvariable=self.frame_interval).grid(
-                row=0, column=1, padx=5, pady=8, sticky="ew"
+                row=0, column=1, padx=5, pady=4, sticky="ew"
             )
 
             tip = (
@@ -322,15 +374,15 @@ class VideoFrameExtractorGUI:
                 f"{' 当前视频总帧数：' + str(total_frames) if total_frames > 0 else ''}"
             )
             ttk.Label(self.mode_frame, text=tip, style="Tip.TLabel", wraplength=700).grid(
-                row=0, column=2, padx=10, pady=8, sticky="w"
+                row=0, column=2, padx=10, pady=4, sticky="w"
             )
 
         elif mode == "time":
             ttk.Label(self.mode_frame, text="抽帧间隔（秒）：").grid(
-                row=0, column=0, padx=5, pady=8, sticky="w"
+                row=0, column=0, padx=5, pady=4, sticky="w"
             )
             ttk.Entry(self.mode_frame, textvariable=self.time_interval).grid(
-                row=0, column=1, padx=5, pady=8, sticky="ew"
+                row=0, column=1, padx=5, pady=4, sticky="ew"
             )
 
             tip = (
@@ -338,15 +390,15 @@ class VideoFrameExtractorGUI:
                 f"{' 当前视频总时长：' + str(duration) + ' 秒' if duration > 0 else ''}"
             )
             ttk.Label(self.mode_frame, text=tip, style="Tip.TLabel", wraplength=700).grid(
-                row=0, column=2, padx=10, pady=8, sticky="w"
+                row=0, column=2, padx=10, pady=4, sticky="w"
             )
 
         elif mode == "specific":
             ttk.Label(self.mode_frame, text="指定帧号（逗号分隔）：").grid(
-                row=0, column=0, padx=5, pady=8, sticky="w"
+                row=0, column=0, padx=5, pady=4, sticky="w"
             )
             ttk.Entry(self.mode_frame, textvariable=self.specific_frames).grid(
-                row=0, column=1, padx=5, pady=8, sticky="ew"
+                row=0, column=1, padx=5, pady=4, sticky="ew"
             )
 
             tip = (
@@ -354,7 +406,7 @@ class VideoFrameExtractorGUI:
                 f"{' 有效范围：0 ~ ' + str(total_frames - 1) if total_frames > 0 else ''}"
             )
             ttk.Label(self.mode_frame, text=tip, style="Tip.TLabel", wraplength=700).grid(
-                row=0, column=2, padx=10, pady=8, sticky="w"
+                row=0, column=2, padx=10, pady=4, sticky="w"
             )
 
     def _validate_and_prepare_params(self):
@@ -423,10 +475,15 @@ class VideoFrameExtractorGUI:
 
             frame_list = []
             for item in raw_list:
-                if not item.lstrip("-").isdigit():
+                # 先按整数解析，再单独校验范围："--5" 这类非法输入会在这里解析失败，
+                # 而不是拖到后面抛 ValueError 并报出与真实原因不符的错误
+                try:
+                    frame_num = int(item)
+                except ValueError:
                     raise ValueError(f"帧号“{item}”不是有效整数！")
-                frame_num = int(item)
-                if frame_num < 0 or frame_num >= self.video_info["total_frames"]:
+                if frame_num < 0:
+                    raise ValueError(f"帧号 {frame_num} 不能为负数（帧号从 0 开始）！")
+                if frame_num >= self.video_info["total_frames"]:
                     raise ValueError(
                         f"帧号 {frame_num} 超出有效范围（0 ~ {self.video_info['total_frames'] - 1}）！"
                     )
@@ -450,6 +507,20 @@ class VideoFrameExtractorGUI:
             self._log(f"参数校验失败：{e}")
             return
 
+        # 覆盖防护：输出目录已有同名模式的帧文件时，先让用户确认一次
+        existing = glob.glob(os.path.join(params["output_dir"], "frame_*_time_*s.jpg"))
+        if existing:
+            confirmed = messagebox.askyesno(
+                "确认覆盖",
+                f"输出目录中已存在 {len(existing)} 个抽帧文件：\n{params['output_dir']}\n\n"
+                f"继续将覆盖同名文件，是否继续？"
+            )
+            if not confirmed:
+                self.progress_label.config(text="已取消")
+                self._log("用户取消了本次抽帧（输出目录已有同名文件）。")
+                return
+            self._log(f"输出目录已存在 {len(existing)} 个同名帧文件，用户确认覆盖。")
+
         self.progress["value"] = 0
         self.progress_label.config(text="开始处理...")
         self._log("开始抽帧...")
@@ -464,6 +535,7 @@ class VideoFrameExtractorGUI:
         elif params["extract_mode"] == "specific":
             self._log(f"指定帧号：{params['specific_frames']}")
 
+        self._cancel_flag = False
         self._set_extracting_state(True)
 
         thread = threading.Thread(target=self._video_frame_extract_worker, args=(params,), daemon=True)
@@ -480,27 +552,51 @@ class VideoFrameExtractorGUI:
                 specific_frames=params["specific_frames"]
             )
 
-            self.root.after(0, lambda: self._on_extract_success(result))
+            self._ui_call(lambda: self._on_extract_success(result))
         except Exception as e:
-            self.root.after(0, lambda: self._on_extract_error(e))
+            # 注意：except 块结束时会自动 del e，必须先用默认参数把异常对象绑定进闭包
+            self._ui_call(lambda err=e: self._on_extract_error(err))
 
     def _on_extract_success(self, result):
         self._set_extracting_state(False)
+        self._cancel_flag = False
+
+        failed_count = result.get("failed_count", 0)
+
+        if result.get("cancelled"):
+            self.progress_label.config(text="已取消")
+            self._log("抽帧已取消。")
+            self._log(f"已抽取 {result['extracted_count']} 帧")
+            if failed_count:
+                self._log(f"保存失败 {failed_count} 帧")
+            messagebox.showinfo(
+                "已取消",
+                f"抽帧已取消。\n\n"
+                f"已抽取：{result['extracted_count']} 帧"
+                + (f"\n保存失败：{failed_count} 帧" if failed_count else "")
+                + f"\n保存目录：{result['output_dir']}"
+            )
+            return
+
         self.progress["value"] = 100
         self.progress_label.config(text="抽帧完成")
         self._log("抽帧完成。")
         self._log(f"共抽取 {result['extracted_count']} 帧")
+        if failed_count:
+            self._log(f"有 {failed_count} 帧保存失败（imwrite 返回 False），请检查输出目录权限或磁盘空间。")
         self._log(f"保存目录：{result['output_dir']}")
 
         messagebox.showinfo(
             "完成",
             f"抽帧完成！\n\n"
             f"共抽取：{result['extracted_count']} 帧\n"
-            f"保存目录：{result['output_dir']}"
+            + (f"保存失败：{failed_count} 帧\n" if failed_count else "")
+            + f"保存目录：{result['output_dir']}"
         )
 
     def _on_extract_error(self, error):
         self._set_extracting_state(False)
+        self._cancel_flag = False
         self.progress_label.config(text="抽帧失败")
         self._log(f"抽帧失败：{error}")
         messagebox.showerror("错误", str(error))
@@ -526,7 +622,9 @@ class VideoFrameExtractorGUI:
             raise RuntimeError("视频帧率或总帧数无效，无法抽帧！")
 
         extracted_count = 0
+        failed_count = 0
         frame_count = 0
+        cancelled = False
 
         # 指定帧模式时使用集合，加快判断
         target_frame_set = set(specific_frames) if specific_frames else set()
@@ -536,6 +634,12 @@ class VideoFrameExtractorGUI:
         next_extract_time = 0.0
 
         while True:
+            # 取消检查：每帧读完后立即响应取消请求
+            if self._cancel_flag:
+                cancelled = True
+                self._ui_call(lambda: self._log("抽帧已取消。"))
+                break
+
             ret, frame = cap.read()
             if not ret:
                 break
@@ -573,6 +677,13 @@ class VideoFrameExtractorGUI:
                 success = cv2.imwrite(save_path, frame)
                 if success:
                     extracted_count += 1
+                else:
+                    # imwrite 返回 False 表示这一帧没写成功（磁盘满、权限不足、
+                    # 路径过长或编码器不支持等），必须记录并计入失败
+                    failed_count += 1
+                    self._ui_call(
+                        lambda p=save_path: self._log(f"保存失败（imwrite 返回 False）：{p}")
+                    )
 
             # 指定帧模式：若所有目标帧都取完则提前结束
             if extract_mode == "specific" and target_frame_set:
@@ -581,8 +692,7 @@ class VideoFrameExtractorGUI:
                 if not target_frame_set:
                     frame_count += 1
                     progress_percent = frame_count / total_frames * 100
-                    self.root.after(
-                        0,
+                    self._ui_call(
                         lambda p=progress_percent, c=frame_count, t=total_frames: self._update_progress(p, c, t)
                     )
                     break
@@ -592,8 +702,7 @@ class VideoFrameExtractorGUI:
             # 每处理一定帧数更新一次进度，避免界面过度刷新
             if frame_count % 10 == 0 or frame_count == total_frames:
                 progress_percent = frame_count / total_frames * 100
-                self.root.after(
-                    0,
+                self._ui_call(
                     lambda p=progress_percent, c=frame_count, t=total_frames: self._update_progress(p, c, t)
                 )
 
@@ -601,6 +710,8 @@ class VideoFrameExtractorGUI:
 
         return {
             "extracted_count": extracted_count,
+            "failed_count": failed_count,
+            "cancelled": cancelled,
             "output_dir": output_dir
         }
 

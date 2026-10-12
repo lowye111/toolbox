@@ -1,6 +1,10 @@
 import tkinter as tk
 from tkinter import messagebox
 import time
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ui_theme
 
 class TransparentRuler:
     def __init__(self, root):
@@ -8,6 +12,9 @@ class TransparentRuler:
         self.root.title("进度条标定尺")
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
+
+        # 应用统一主题（随后立即把底色改回透明色，避免破坏透明效果）
+        ui_theme.apply(self.root)
 
         # 透明背景色
         self.transparent_bg = '#abcdef'
@@ -21,16 +28,19 @@ class TransparentRuler:
 
         # 标题栏
         self.title_height = 30
-        self.title_bar = tk.Frame(self.root, bg='#2c3e50', height=self.title_height, bd=0)
+        self.title_bar = tk.Frame(self.root, bg='#22303f', height=self.title_height, bd=0)
         self.title_bar.pack(fill=tk.X, side=tk.TOP)
         self.title_bar.pack_propagate(False)
 
-        title_label = tk.Label(self.title_bar, text="进度条标定尺", bg='#2c3e50', fg='white',
-                               font=('Arial', 10, 'bold'))
+        title_label = tk.Label(self.title_bar, text="进度条标定尺", bg='#22303f', fg='white',
+                               font=ui_theme.ui_font(10, True))
         title_label.pack(side=tk.LEFT, padx=10)
 
         close_btn = tk.Button(self.title_bar, text='✕', command=self.root.destroy,
-                              bg='#e74c3c', fg='white', bd=0, padx=8, font=('Arial', 10, 'bold'))
+                              bg=ui_theme.COLORS["danger"], fg='white',
+                              activebackground=ui_theme.COLORS["danger_hover"], activeforeground='white',
+                              bd=0, relief=tk.FLAT, cursor="hand2", padx=8,
+                              font=ui_theme.ui_font(9, True))
         close_btn.pack(side=tk.RIGHT, padx=5)
 
         self.title_bar.bind("<Button-1>", self.start_move)
@@ -57,23 +67,32 @@ class TransparentRuler:
         self.canvas.tag_bind("cursor2", "<B1-Motion>", self.on_cursor2_drag)
 
         # 控制面板（水平排列按钮和时间标签）
-        self.control_frame = tk.Frame(self.root, bg='lightgray', bd=1, relief=tk.RAISED)
+        self.control_frame = tk.Frame(self.root, bg='#eef1f6', bd=1, relief=tk.RAISED)
         self.control_frame.place(x=10, y=self.window_height - 80, width=680, height=75)
 
         # 游标1区域
-        self.btn_cursor1 = tk.Button(self.control_frame, text="记录游标1位置", command=self.record_cursor1, width=16)
+        self.btn_cursor1 = tk.Button(self.control_frame, text="记录游标1位置", command=self.record_cursor1, width=16,
+                                     bg=ui_theme.COLORS["primary"], fg="white",
+                                     activebackground=ui_theme.COLORS["primary_hover"], activeforeground="white",
+                                     relief=tk.FLAT, cursor="hand2", font=ui_theme.ui_font(9))
         self.btn_cursor1.grid(row=0, column=0, padx=5, pady=5)
-        self.time_label1 = tk.Label(self.control_frame, text="未记录", bg='lightgray', font=('Arial', 9))
+        self.time_label1 = tk.Label(self.control_frame, text="未记录", bg='#eef1f6', font=ui_theme.ui_font(9))
         self.time_label1.grid(row=0, column=1, padx=5)
 
         # 游标2区域
-        self.btn_cursor2 = tk.Button(self.control_frame, text="记录游标2位置", command=self.record_cursor2, width=16)
+        self.btn_cursor2 = tk.Button(self.control_frame, text="记录游标2位置", command=self.record_cursor2, width=16,
+                                     bg=ui_theme.COLORS["primary"], fg="white",
+                                     activebackground=ui_theme.COLORS["primary_hover"], activeforeground="white",
+                                     relief=tk.FLAT, cursor="hand2", font=ui_theme.ui_font(9))
         self.btn_cursor2.grid(row=1, column=0, padx=5, pady=5)
-        self.time_label2 = tk.Label(self.control_frame, text="未记录", bg='lightgray', font=('Arial', 9))
+        self.time_label2 = tk.Label(self.control_frame, text="未记录", bg='#eef1f6', font=ui_theme.ui_font(9))
         self.time_label2.grid(row=1, column=1, padx=5)
 
         # 比较按钮
-        self.btn_compare = tk.Button(self.control_frame, text="判断是否进行", command=self.compare, width=16)
+        self.btn_compare = tk.Button(self.control_frame, text="判断是否进行", command=self.compare, width=16,
+                                     bg=ui_theme.COLORS["success"], fg="white",
+                                     activebackground=ui_theme.COLORS["success_hover"], activeforeground="white",
+                                     relief=tk.FLAT, cursor="hand2", font=ui_theme.ui_font(9))
         self.btn_compare.grid(row=0, column=2, rowspan=2, padx=20, pady=5)
 
         # 存储记录的时间戳和游标位置
@@ -137,14 +156,21 @@ class TransparentRuler:
             self.canvas.move(self.cursor2_slider, dx, 0)
             self.canvas.move(self.cursor2_text, dx, 0)
 
+    def _clamp_x(self, new_x):
+        """把游标限制在画布可见范围内（用 canvas 实际宽度，而非窗口宽度）"""
+        try:
+            right = max(1, self.canvas.winfo_width())
+        except Exception:
+            right = self.window_width
+        return max(0, min(new_x, right))
+
     def on_cursor1_press(self, event):
         self.drag_start_x = event.x
         self.drag_start_cursor_x = self.cursor1_x
 
     def on_cursor1_drag(self, event):
         dx = event.x - self.drag_start_x
-        new_x = self.drag_start_cursor_x + dx
-        new_x = max(0, min(new_x, self.window_width))
+        new_x = self._clamp_x(self.drag_start_cursor_x + dx)
         if new_x != self.cursor1_x:
             self.move_cursor(1, new_x)
 
@@ -154,8 +180,7 @@ class TransparentRuler:
 
     def on_cursor2_drag(self, event):
         dx = event.x - self.drag_start_x
-        new_x = self.drag_start_cursor_x + dx
-        new_x = max(0, min(new_x, self.window_width))
+        new_x = self._clamp_x(self.drag_start_cursor_x + dx)
         if new_x != self.cursor2_x:
             self.move_cursor(2, new_x)
 

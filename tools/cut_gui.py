@@ -1,16 +1,22 @@
 import cv2
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import threading
+import ui_theme
 
 class ImageCropApp:
     def __init__(self, root):
         self.root = root
         self.root.title("图片批量裁剪工具")
-        self.root.geometry("900x700")
+        self.root.geometry("900x840")
         self.root.resizable(True, True)
+
+        # 应用统一主题
+        ui_theme.apply(self.root)
 
         # 初始化变量
         self.input_folder = tk.StringVar()
@@ -32,9 +38,12 @@ class ImageCropApp:
         self.image_tk = None
         self.crop_rect_id = None
         self.image_files = []
+        # 处理过程中收集的失败文件说明（GUI 无控制台，出错信息累计到这里，结束时汇总提示）
+        self.failed_files = []
 
         # 创建主布局
         self.create_widgets()
+        ui_theme.center(self.root, 900, 840, min_w=800, min_h=620)
 
     def create_widgets(self):
         # 顶部配置区域
@@ -55,23 +64,9 @@ class ImageCropApp:
         ttk.Entry(output_row, textvariable=self.output_folder, width=50).pack(side=tk.LEFT, padx=5)
         ttk.Button(output_row, text="浏览", command=self.browse_output).pack(side=tk.LEFT)
 
-        # 中间预览区域
-        preview_frame = ttk.LabelFrame(self.root, text="裁剪预览", padding="10")
-        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        # 画布容器
-        canvas_container = ttk.Frame(preview_frame)
-        canvas_container.pack(fill=tk.BOTH, expand=True)
-
-        self.canvas = tk.Canvas(canvas_container, bg="#eee", cursor="cross")
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.canvas.bind("<Button-1>", self.on_canvas_click)
-        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
-
-        # 底部控制面板
+        # 底部控制面板（先于预览区打包，保证窗口较小时不被挤压隐藏）
         bottom_frame = ttk.LabelFrame(self.root, text="控制", padding="10")
-        bottom_frame.pack(fill=tk.X, padx=10, pady=5)
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
 
         # 裁剪区域信息
         info_frame = ttk.Frame(bottom_frame)
@@ -98,7 +93,7 @@ class ImageCropApp:
 
         ttk.Button(btn_frame, text="🔍 加载图片", command=self.load_images).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🗑️ 清除选区", command=self.clear_selection).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="⚡ 开始裁剪", command=self.start_cropping).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="⚡ 开始裁剪", command=self.start_cropping, style="Primary.TButton").pack(side=tk.LEFT, padx=5)
 
         # 进度显示
         progress_frame = ttk.Frame(bottom_frame)
@@ -113,8 +108,23 @@ class ImageCropApp:
         self.progress_bar.pack(side=tk.LEFT, padx=10)
 
         # 状态标签
-        self.status_label = ttk.Label(bottom_frame, text="就绪", foreground="#2196F3")
+        self.status_label = ttk.Label(bottom_frame, text="就绪", foreground=ui_theme.COLORS["primary"])
         self.status_label.pack(side=tk.RIGHT)
+
+        # 中间预览区域
+        preview_frame = ttk.LabelFrame(self.root, text="裁剪预览", padding="10")
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 画布容器
+        canvas_container = ttk.Frame(preview_frame)
+        canvas_container.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(canvas_container, bg=ui_theme.COLORS["log_bg"], cursor="cross",
+                                highlightthickness=1, highlightbackground=ui_theme.COLORS["border"])
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
 
     def browse_input(self):
         folder = filedialog.askdirectory(title="选择输入目录")
@@ -162,12 +172,12 @@ class ImageCropApp:
             import numpy as np
             self.current_image = cv2.imdecode(np.fromfile(filepath, dtype=np.uint8), cv2.IMREAD_COLOR)
         except Exception as e:
-            print(f"读取图片失败: {e}")
             self.current_image = None
+            self.status_label.config(text=f"读取图片失败: {os.path.basename(filepath)} - {e}")
             return
 
         if self.current_image is None:
-            print(f"无法读取图片: {filepath}")
+            self.status_label.config(text=f"无法读取图片: {os.path.basename(filepath)}")
             return
 
         # 转换颜色空间
@@ -238,13 +248,6 @@ class ImageCropApp:
             )
 
             self.status_label.config(text=f"选区: ({x1},{y1}) - ({x2},{y2})  [{x2-x1}x{y2-y1}]")
-            
-            # 调试：输出坐标计算信息
-            print(f"=== 选区信息 ===")
-            print(f"画布坐标: ({self.ix},{self.iy}) - ({event.x},{event.y})")
-            print(f"缩放比例: {self.scale}")
-            print(f"原始坐标: ({x1},{y1}) - ({x2},{y2})")
-            print(f"原始图片尺寸: {self.current_image.shape[1]}x{self.current_image.shape[0]}")
 
     def clear_selection(self):
         if self.crop_rect_id:
@@ -276,10 +279,17 @@ class ImageCropApp:
         # 创建输出目录（确保所有父目录都存在）
         try:
             os.makedirs(output_folder, exist_ok=True)
-            print(f"输出目录: {output_folder}")
         except Exception as e:
             messagebox.showerror("错误", f"无法创建输出目录: {e}")
             return
+
+        # 输出目录与输入目录相同时，同名图片会被直接覆盖（open(...,'wb') 不报错），先确认
+        if os.path.abspath(output_folder).lower() == os.path.abspath(self.input_folder.get()).lower():
+            if not messagebox.askyesno(
+                    "输出目录与输入目录相同",
+                    "输出目录与输入目录相同，保存时会直接覆盖原有图片且无法恢复。\n\n是否继续？"):
+                self.status_label.config(text="已取消：输出目录与输入目录相同")
+                return
 
         # 获取裁剪参数
         x1 = self.crop_x1.get()
@@ -304,6 +314,7 @@ class ImageCropApp:
         import numpy as np
         success_count = 0
         fail_count = 0
+        self.failed_files = []
 
         for idx, filepath in enumerate(self.image_files):
             try:
@@ -311,7 +322,7 @@ class ImageCropApp:
                 img = cv2.imdecode(np.fromfile(filepath, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if img is None:
                     fail_count += 1
-                    print(f"无法读取图片: {filepath}")
+                    self.failed_files.append(f"{os.path.basename(filepath)}（无法读取图片）")
                     continue
 
                 # 检查坐标是否在图片范围内
@@ -320,33 +331,37 @@ class ImageCropApp:
                 crop_y1 = max(0, min(y1, height - 1))
                 crop_x2 = max(0, min(x2, width))
                 crop_y2 = max(0, min(y2, height))
+                if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+                    fail_count += 1
+                    self.failed_files.append(f"{os.path.basename(filepath)}（裁剪区域超出图片范围）")
+                    continue
 
                 # 裁剪
                 cropped = img[crop_y1:crop_y2, crop_x1:crop_x2]
-                
-                # 调试：输出裁剪信息
-                print(f"文件: {os.path.basename(filepath)}")
-                print(f"原始尺寸: {width}x{height}")
-                print(f"裁剪区域: ({crop_x1},{crop_y1}) - ({crop_x2},{crop_y2})")
-                print(f"裁剪后尺寸: {cropped.shape[1]}x{cropped.shape[0]}")
 
                 # 保存（支持中文路径）
                 filename = os.path.basename(filepath)
                 save_path = os.path.join(output_folder, filename)
-                success, _ = cv2.imencode(os.path.splitext(filename)[1].lower(), cropped)
+                ext = os.path.splitext(filename)[1].lower()
+                try:
+                    success, buf = cv2.imencode(ext, cropped)
+                except Exception as e:
+                    fail_count += 1
+                    self.failed_files.append(f"{filename}（扩展名 {ext} 不支持编码: {str(e).strip()}）")
+                    continue
                 if success:
                     with open(save_path, 'wb') as f:
-                        f.write(success.tobytes())
+                        f.write(buf.tobytes())
                 else:
                     fail_count += 1
-                    print(f"保存失败: {save_path}")
+                    self.failed_files.append(f"{filename}（编码失败，扩展名 {ext} 可能不受支持）")
                     continue
 
                 success_count += 1
 
             except Exception as e:
                 fail_count += 1
-                print(f"处理 {filepath} 失败: {e}")
+                self.failed_files.append(f"{os.path.basename(filepath)}（{e}）")
 
             # 更新进度
             self.processed_count.set(str(success_count + fail_count))
@@ -357,7 +372,12 @@ class ImageCropApp:
         # 完成
         self.is_processing = False
         self.status_label.config(text=f"完成！成功: {success_count} | 失败: {fail_count}")
-        messagebox.showinfo("完成", f"批量裁剪完成！\n成功: {success_count} 张\n失败: {fail_count} 张\n输出目录: {output_folder}")
+        result_msg = f"批量裁剪完成！\n成功: {success_count} 张\n失败: {fail_count} 张\n输出目录: {output_folder}"
+        if self.failed_files:
+            preview = "\n".join(f"· {item}" for item in self.failed_files[:5])
+            more = f"\n... 等共 {len(self.failed_files)} 个" if len(self.failed_files) > 5 else ""
+            result_msg += f"\n\n失败文件:\n{preview}{more}"
+        messagebox.showinfo("完成", result_msg)
 
 if __name__ == "__main__":
     root = tk.Tk()

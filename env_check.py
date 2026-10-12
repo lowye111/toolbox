@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -33,9 +34,30 @@ MODULE_TO_PIP = {
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# ---- 缓存 ----
+# load_config 会被 model_train 的预览函数在每次按键时调用，_find_conda_envs 会执行
+# `conda info --json`（最长 15 秒）。这里做缓存，避免重复读盘与反复启动子进程。
+_CONFIG_CACHE = {"key": None, "data": None}
+_CONDA_ENVS_CACHE = {"time": 0.0, "data": None}
+_YOLOV5_DIR_CACHE = {"time": 0.0, "data": None}
+_CONDA_ENVS_TTL = 60.0  # 秒；conda 环境在会话期间很少变化
+
+
+def _config_cache_key():
+    """用 mtime+size 作为缓存键：既能省掉重复读盘，也能感知外部手工修改"""
+    try:
+        st = CONFIG_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
 
 def load_config():
-    """读取 config.json，不存在则用默认值创建"""
+    """读取 config.json，不存在则用默认值创建（带缓存，文件变化时自动失效）"""
+    key = _config_cache_key()
+    if key is not None and _CONFIG_CACHE["key"] == key:
+        return dict(_CONFIG_CACHE["data"])
+
     config = dict(DEFAULT_CONFIG)
     try:
         if CONFIG_PATH.exists():
@@ -45,16 +67,22 @@ def load_config():
             save_config(config)
     except Exception:
         pass
+
+    _CONFIG_CACHE["key"] = _config_cache_key()
+    _CONFIG_CACHE["data"] = dict(config)
     return config
 
 
 def save_config(config):
-    """保存 config.json"""
+    """保存 config.json（成功后让配置缓存失效）"""
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+        return False
+    _CONFIG_CACHE["key"] = _config_cache_key()
+    _CONFIG_CACHE["data"] = dict(config)
+    return True
 
 
 def missing_modules(modules):
@@ -133,7 +161,11 @@ def ensure_modules(modules, title="缺少依赖", parent=None):
 
 
 def _find_conda_envs():
-    """返回 {环境名: python.exe 路径}，探测失败返回空字典"""
+    """返回 {环境名: python.exe 路径}，探测失败返回空字典（结果带 TTL 缓存）"""
+    now = time.time()
+    if _CONDA_ENVS_CACHE["data"] is not None and now - _CONDA_ENVS_CACHE["time"] < _CONDA_ENVS_TTL:
+        return dict(_CONDA_ENVS_CACHE["data"])
+
     envs = {}
     try:
         result = subprocess.run("conda info --json", shell=True,
@@ -161,6 +193,10 @@ def _find_conda_envs():
                     python_exe = d / "python.exe"
                     if python_exe.exists():
                         envs[d.name] = str(python_exe)
+
+    # 探测到结果才缓存；空结果也缓存，避免反复启动 conda 拖慢界面
+    _CONDA_ENVS_CACHE["time"] = now
+    _CONDA_ENVS_CACHE["data"] = dict(envs)
     return envs
 
 
@@ -188,7 +224,18 @@ def find_env_python(env_name=None):
 
 
 def find_yolov5_dir():
-    """自动查找 yolov5 仓库目录（需包含 train.py）；找不到返回 None"""
+    """自动查找 yolov5 仓库目录（需包含 train.py）；找不到返回 None（带 TTL 缓存）"""
+    now = time.time()
+    if _YOLOV5_DIR_CACHE["time"] and now - _YOLOV5_DIR_CACHE["time"] < _CONDA_ENVS_TTL:
+        return _YOLOV5_DIR_CACHE["data"]
+
+    result = _locate_yolov5_dir()
+    _YOLOV5_DIR_CACHE["time"] = now
+    _YOLOV5_DIR_CACHE["data"] = result
+    return result
+
+
+def _locate_yolov5_dir():
     config = load_config()
     user_dir = config.get("yolov5_dir", "")
     if user_dir and (Path(user_dir) / "train.py").exists():

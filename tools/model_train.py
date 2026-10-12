@@ -24,12 +24,30 @@ except Exception:
     def find_yolov5_dir():
         return None
 
+import ui_theme
+
+# Windows 平台用于隐藏子进程控制台窗口；非 Windows 平台无此常量，给出兼容默认值
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def decode_output_line(raw):
+    """解码子进程输出行：优先进程实际编码，避免中文乱码/丢字。
+    Windows 中文环境下 conda/yolo 可能输出 GBK，这里按序尝试。"""
+    if isinstance(raw, str):
+        return raw
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
 
 class YOLODataPrepApp:
     def __init__(self, root):
         self.root = root
         self.root.title("YOLO 数据集预处理与训练工具")
-        self.root.geometry("1100x800")
+        ui_theme.center(self.root, 1100, 920, min_w=1000, min_h=760)
 
         # 初始化属性
         self.has_gpu = self.check_gpu()
@@ -48,6 +66,10 @@ class YOLODataPrepApp:
 
         # 设置样式
         self.setup_styles()
+
+        # 状态栏（先于选项卡打包，保证窗口较小时不被挤压隐藏）
+        self.status_var = tk.StringVar(value="就绪")
+        ui_theme.make_status_bar(self.root, self.status_var, side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 8))
 
         # 创建选项卡
         self.notebook = ttk.Notebook(root)
@@ -76,44 +98,32 @@ class YOLODataPrepApp:
         self.setup_test_tab()
         self.setup_export_tab()
 
-        # 状态栏
-        self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(root, textvariable=self.status_var,
-                               relief=tk.SUNKEN, anchor=tk.W,
-                               font=('微软雅黑', 8))
-        status_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
+    def _python_exe(self):
+        """训练/测试用的 python 解释器：优先使用界面上填写的 Python 路径。
+
+        yolov5 分支需要显式调用 python 执行 train.py/detect.py，
+        这里让“Python路径”输入框真正生效（留空时退回 PATH 中的 python）。
+        """
+        try:
+            configured = (self.python_path.get() or "").strip()
+        except Exception:
+            configured = ""
+        if configured and os.path.exists(configured):
+            return configured
+        return "python"
 
     def check_gpu(self):
         """检查GPU是否可用"""
         try:
             import torch
             return torch.cuda.is_available()
-        except:
+        except Exception:
             return False
 
     def setup_styles(self):
-        """设置样式"""
-        style = ttk.Style()
-        style.theme_use('clam')
-
-        # 颜色配置
-        self.colors = {
-            'primary': '#2196F3',
-            'success': '#4CAF50',
-            'warning': '#FF9800',
-            'error': '#F44336',
-            'bg': '#f5f5f5'
-        }
-
-        # 配置样式
-        style.configure('TLabel', font=('微软雅黑', 9))
-        style.configure('TButton', font=('微软雅黑', 9))
-        style.configure('TRadiobutton', font=('微软雅黑', 9))
-        style.configure('TCheckbutton', font=('微软雅黑', 9))
-        style.configure('TEntry', font=('微软雅黑', 9))
-        style.configure('TLabelframe', font=('微软雅黑', 9, 'bold'))
-        style.configure('TLabelframe.Label', font=('微软雅黑', 9, 'bold'))
-        style.configure('Success.TButton', foreground='white', background='#4CAF50')
+        """设置样式（统一主题：ui_theme）"""
+        self.colors = ui_theme.COLORS
+        ui_theme.apply(self.root)
 
     # ==================== 一键处理选项卡 ====================
     def setup_oneclick_tab(self):
@@ -122,23 +132,23 @@ class YOLODataPrepApp:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
-        title = ttk.Label(main_frame, text="⚡ 一键处理数据集", font=('微软雅黑', 14, 'bold'), foreground='#FF5722')
-        title.pack(anchor=tk.W, pady=(0, 20))
+        title = ttk.Label(main_frame, text="⚡ 一键处理数据集", style="PageTitle.TLabel")
+        title.pack(anchor=tk.W, pady=(0, 12))
 
         # 说明
         desc = ttk.Label(main_frame, text="自动完成：图片预处理 → 生成data.yaml → 开始训练", 
-                         font=('微软雅黑', 10), foreground='#666')
-        desc.pack(anchor=tk.W, pady=(0, 15))
+                         style="Description.TLabel")
+        desc.pack(anchor=tk.W, pady=(0, 8))
 
         # 输入设置
         input_frame = ttk.LabelFrame(main_frame, text="输入设置", padding="15")
-        input_frame.pack(fill=tk.X, pady=(0, 15))
+        input_frame.pack(fill=tk.X, pady=(0, 8))
 
         # 原始数据目录
         row1 = ttk.Frame(input_frame)
         row1.pack(fill=tk.X, pady=3)
         ttk.Label(row1, text="原始数据目录:", width=12).pack(side=tk.LEFT)
-        self.oneclick_input = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data")
+        self.oneclick_input = tk.StringVar(value="")
         ttk.Entry(row1, textvariable=self.oneclick_input, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(row1, text="📁", command=lambda: self.browse_dir(self.oneclick_input), width=3).pack(side=tk.RIGHT)
 
@@ -146,7 +156,7 @@ class YOLODataPrepApp:
         row2 = ttk.Frame(input_frame)
         row2.pack(fill=tk.X, pady=3)
         ttk.Label(row2, text="输出目录:", width=12).pack(side=tk.LEFT)
-        self.oneclick_output = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\processed")
+        self.oneclick_output = tk.StringVar(value="")
         ttk.Entry(row2, textvariable=self.oneclick_output, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(row2, text="📁", command=lambda: self.browse_dir(self.oneclick_output), width=3).pack(side=tk.RIGHT)
 
@@ -159,7 +169,7 @@ class YOLODataPrepApp:
 
         # 训练参数
         params_frame = ttk.LabelFrame(main_frame, text="训练参数", padding="15")
-        params_frame.pack(fill=tk.X, pady=(0, 15))
+        params_frame.pack(fill=tk.X, pady=(0, 8))
 
         params_row1 = ttk.Frame(params_frame)
         params_row1.pack(fill=tk.X, pady=3)
@@ -197,22 +207,25 @@ class YOLODataPrepApp:
         self.oneclick_val_ratio = tk.StringVar(value="0.2")
         ttk.Entry(params_row2, textvariable=self.oneclick_val_ratio, width=8).pack(side=tk.LEFT, padx=5)
 
-        # 进度显示
-        progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="10")
-        progress_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-
-        self.oneclick_output_text = ScrolledText(progress_frame, height=15, font=('Consolas', 9))
-        self.oneclick_output_text.pack(fill=tk.BOTH, expand=True)
-
-        # 控制按钮
+        # 控制按钮（先于进度区打包，保证窗口较小时不被挤压隐藏）
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.oneclick_btn = ttk.Button(btn_frame, text="🚀 一键处理并训练", command=self.run_oneclick, width=20)
+        self.oneclick_btn = ttk.Button(btn_frame, text="🚀 一键处理并训练", style="Primary.TButton",
+                                       command=self.run_oneclick, width=20)
         self.oneclick_btn.pack(side=tk.LEFT, padx=5)
 
-        self.oneclick_stop_btn = ttk.Button(btn_frame, text="⏹ 停止", command=self.stop_oneclick, state=tk.DISABLED, width=10)
+        self.oneclick_stop_btn = ttk.Button(btn_frame, text="⏹ 停止", style="Danger.TButton",
+                                            command=self.stop_oneclick, state=tk.DISABLED, width=10)
         self.oneclick_stop_btn.pack(side=tk.LEFT, padx=5)
+
+        # 进度显示
+        progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="6")
+        progress_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        self.oneclick_output_text = ScrolledText(progress_frame, height=15, font=ui_theme.mono_font(9))
+        self.oneclick_output_text.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.oneclick_output_text)
 
     def run_oneclick(self):
         """执行一键处理"""
@@ -370,7 +383,7 @@ class YOLODataPrepApp:
                 self.root.after(0, lambda: self.oneclick_finished(False))
                 return
             cmd = [
-                "python",
+                self._python_exe(),
                 os.path.join(yolov5_dir, "train.py"),
                 "--data", data_yaml,
                 "--weights", model_name,
@@ -408,15 +421,12 @@ class YOLODataPrepApp:
                 stderr=subprocess.STDOUT,
                 universal_newlines=False,
                 bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=_NO_WINDOW
             )
             self.oneclick_process = process
 
             for line in process.stdout:
-                try:
-                    decoded_line = line.decode('utf-8', errors='ignore')
-                except:
-                    decoded_line = line.decode('gbk', errors='ignore')
+                decoded_line = decode_output_line(line)
                 
                 clean_line = ansi_escape.sub('', decoded_line)
                 if clean_line.strip():
@@ -463,18 +473,18 @@ class YOLODataPrepApp:
 
         # 标题
         title_label = ttk.Label(main_frame, text="📸 数据集图片预处理",
-                                font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
-        title_label.pack(anchor=tk.W, pady=(0, 15))
+                                style="PageTitle.TLabel")
+        title_label.pack(anchor=tk.W, pady=(0, 8))
 
         # 输入目录选择
-        input_frame = ttk.LabelFrame(main_frame, text="输入目录", padding="10")
+        input_frame = ttk.LabelFrame(main_frame, text="输入目录", padding="6")
         input_frame.pack(fill=tk.X, pady=(0, 10))
 
         # 训练集图片目录
         img_row = ttk.Frame(input_frame)
         img_row.pack(fill=tk.X, pady=2)
         ttk.Label(img_row, text="训练集图片:", width=10).pack(side=tk.LEFT)
-        self.prep_images_dir = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\images\train")
+        self.prep_images_dir = tk.StringVar(value="")
         ttk.Entry(img_row, textvariable=self.prep_images_dir).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(img_row, text="📁", command=lambda: self.browse_dir(self.prep_images_dir), width=3).pack(
             side=tk.RIGHT)
@@ -483,20 +493,20 @@ class YOLODataPrepApp:
         label_row = ttk.Frame(input_frame)
         label_row.pack(fill=tk.X, pady=2)
         ttk.Label(label_row, text="训练集标签:", width=10).pack(side=tk.LEFT)
-        self.prep_labels_dir = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\labels\train")
+        self.prep_labels_dir = tk.StringVar(value="")
         ttk.Entry(label_row, textvariable=self.prep_labels_dir).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(label_row, text="📁", command=lambda: self.browse_dir(self.prep_labels_dir), width=3).pack(
             side=tk.RIGHT)
 
         # 输出目录设置
-        output_frame = ttk.LabelFrame(main_frame, text="输出设置", padding="10")
+        output_frame = ttk.LabelFrame(main_frame, text="输出设置", padding="6")
         output_frame.pack(fill=tk.X, pady=(0, 10))
 
         # 输出根目录
         out_row = ttk.Frame(output_frame)
         out_row.pack(fill=tk.X, pady=2)
         ttk.Label(out_row, text="输出根目录:", width=10).pack(side=tk.LEFT)
-        self.prep_output_root = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\processed")
+        self.prep_output_root = tk.StringVar(value="")
         ttk.Entry(out_row, textvariable=self.prep_output_root).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(out_row, text="📁", command=lambda: self.browse_dir(self.prep_output_root), width=3).pack(
             side=tk.RIGHT)
@@ -510,7 +520,7 @@ class YOLODataPrepApp:
         ttk.Label(name_row, text="(将创建子目录)").pack(side=tk.LEFT, padx=5)
 
         # 图片大小设置
-        size_frame = ttk.LabelFrame(main_frame, text="图片大小设置", padding="10")
+        size_frame = ttk.LabelFrame(main_frame, text="图片大小设置", padding="6")
         size_frame.pack(fill=tk.X, pady=(0, 10))
 
         size_row = ttk.Frame(size_frame)
@@ -529,7 +539,7 @@ class YOLODataPrepApp:
         ttk.Entry(size_row, textvariable=self.prep_size, width=8).pack(side=tk.LEFT, padx=5)
 
         # 验证集设置
-        val_frame = ttk.LabelFrame(main_frame, text="验证集设置", padding="10")
+        val_frame = ttk.LabelFrame(main_frame, text="验证集设置", padding="6")
         val_frame.pack(fill=tk.X, pady=(0, 10))
 
         # 是否转换验证集
@@ -544,7 +554,7 @@ class YOLODataPrepApp:
         val_img_row = ttk.Frame(self.prep_val_dir_frame)
         val_img_row.pack(fill=tk.X, pady=2)
         ttk.Label(val_img_row, text="验证集图片:", width=10).pack(side=tk.LEFT)
-        self.prep_val_images = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\images\val")
+        self.prep_val_images = tk.StringVar(value="")
         ttk.Entry(val_img_row, textvariable=self.prep_val_images).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(val_img_row, text="📁", command=lambda: self.browse_dir(self.prep_val_images), width=3).pack(
             side=tk.RIGHT)
@@ -552,7 +562,7 @@ class YOLODataPrepApp:
         val_label_row = ttk.Frame(self.prep_val_dir_frame)
         val_label_row.pack(fill=tk.X, pady=2)
         ttk.Label(val_label_row, text="验证集标签:", width=10).pack(side=tk.LEFT)
-        self.prep_val_labels = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\labels\val")
+        self.prep_val_labels = tk.StringVar(value="")
         ttk.Entry(val_label_row, textvariable=self.prep_val_labels).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(val_label_row, text="📁", command=lambda: self.browse_dir(self.prep_val_labels), width=3).pack(
             side=tk.RIGHT)
@@ -560,7 +570,7 @@ class YOLODataPrepApp:
         # 提示标签
         self.prep_val_hint = ttk.Label(val_frame,
                                        text="若不转换验证集，将使用训练集作为验证集（data.yaml中设置 val: train）",
-                                       font=('微软雅黑', 8), foreground='gray')
+                                       style="Tip.TLabel")
         self.prep_val_hint.pack(anchor=tk.W, pady=2)
 
         # 初始隐藏验证集目录
@@ -578,13 +588,13 @@ class YOLODataPrepApp:
                    width=20).pack(side=tk.LEFT, padx=5)
 
         # 预览区域
-        preview_frame = ttk.LabelFrame(main_frame, text="处理预览", padding="10")
+        preview_frame = ttk.LabelFrame(main_frame, text="处理预览", padding="6")
         preview_frame.pack(fill=tk.BOTH, expand=True)
 
         self.prep_preview = ScrolledText(preview_frame, height=10,
-                                         font=('Consolas', 9), wrap=tk.WORD,
-                                         bg='#fafafa')
+                                         font=ui_theme.mono_font(9), wrap=tk.WORD)
         self.prep_preview.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.prep_preview)
 
     def toggle_val_conversion(self):
         """切换验证集转换选项"""
@@ -923,38 +933,38 @@ names:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
-        title = ttk.Label(main_frame, text="📋 数据集配置向导", font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
-        title.pack(anchor=tk.W, pady=(0, 20))
+        title = ttk.Label(main_frame, text="📋 数据集配置向导", style="PageTitle.TLabel")
+        title.pack(anchor=tk.W, pady=(0, 12))
 
         # 数据集根目录选择
         path_frame = ttk.LabelFrame(main_frame, text="数据集位置", padding="15")
-        path_frame.pack(fill=tk.X, pady=(0, 15))
+        path_frame.pack(fill=tk.X, pady=(0, 8))
 
         path_select = ttk.Frame(path_frame)
         path_select.pack(fill=tk.X)
 
         ttk.Label(path_select, text="根目录:").pack(side=tk.LEFT)
-        self.dataset_path = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data")
+        self.dataset_path = tk.StringVar(value="")
         ttk.Entry(path_select, textvariable=self.dataset_path, width=50).pack(side=tk.LEFT, padx=10, fill=tk.X,
                                                                               expand=True)
         ttk.Button(path_select, text="📁", command=self.browse_dataset).pack(side=tk.RIGHT)
 
         # 文件结构说明
         struct_frame = ttk.LabelFrame(main_frame, text="📁 期望的文件结构", padding="15")
-        struct_frame.pack(fill=tk.X, pady=(0, 15))
+        struct_frame.pack(fill=tk.X, pady=(0, 8))
 
-        struct_text = """C:\\Users\\84820\\Desktop\\soldier_data\\
+        struct_text = """<数据集根目录>\\
 ├── images\\
 │   └── train\\          ← 存放所有图片
 ├── labels\\
 │   └── train\\          ← 存放所有对应的 .txt 标注文件
 └── data.yaml            ← 数据集配置文件（将自动生成）"""
 
-        ttk.Label(struct_frame, text=struct_text, font=('Consolas', 9), foreground='#666').pack(anchor=tk.W)
+        ttk.Label(struct_frame, text=struct_text, font=ui_theme.mono_font(9), foreground=ui_theme.COLORS["text_secondary"]).pack(anchor=tk.W)
 
         # data.yaml 模板
         yaml_frame = ttk.LabelFrame(main_frame, text="📄 data.yaml 模板", padding="15")
-        yaml_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        yaml_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         yaml_template = """# 数据集根目录（使用绝对路径）
 path: {}/images
@@ -982,8 +992,9 @@ names:
   - rssg
   - bssg"""
 
-        self.yaml_text = ScrolledText(yaml_frame, height=15, font=('Consolas', 10))
+        self.yaml_text = ScrolledText(yaml_frame, height=15, font=ui_theme.mono_font(10))
         self.yaml_text.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.yaml_text)
         self.yaml_text.insert('1.0', yaml_template.format(self.dataset_path.get()))
 
         # 让文本可选
@@ -1001,7 +1012,7 @@ names:
         # 提示信息
         notice = ttk.Label(main_frame,
                            text="⚠️ 提示：如果新增数据集，请清除 labels 中的 .cache 缓存文件",
-                           foreground='red', font=('微软雅黑', 9))
+                           foreground=ui_theme.COLORS["danger"], font=ui_theme.ui_font(9))
         notice.pack(anchor=tk.W, pady=10)
 
     def browse_dataset(self):
@@ -1095,18 +1106,18 @@ names:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
-        title = ttk.Label(main_frame, text="🚀 YOLO 训练配置", font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
-        title.pack(anchor=tk.W, pady=(0, 20))
+        title = ttk.Label(main_frame, text="🚀 YOLO 训练配置", style="PageTitle.TLabel")
+        title.pack(anchor=tk.W, pady=(0, 12))
 
         # 基本配置
         basic_frame = ttk.LabelFrame(main_frame, text="基本配置", padding="15")
-        basic_frame.pack(fill=tk.X, pady=(0, 15))
+        basic_frame.pack(fill=tk.X, pady=(0, 8))
 
         # 数据集路径
         row1 = ttk.Frame(basic_frame)
         row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="数据集根目录:", width=12).pack(side=tk.LEFT)
-        self.train_dataset = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\processed\soldier_dataset_320")
+        self.train_dataset = tk.StringVar(value="")
         ttk.Entry(row1, textvariable=self.train_dataset).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(row1, text="📁", command=self.browse_train_dataset, width=3).pack(side=tk.RIGHT)
 
@@ -1120,7 +1131,7 @@ names:
 
         # 训练参数
         params_frame = ttk.LabelFrame(main_frame, text="训练参数", padding="15")
-        params_frame.pack(fill=tk.X, pady=(0, 15))
+        params_frame.pack(fill=tk.X, pady=(0, 8))
 
         # 第一行
         row3 = ttk.Frame(params_frame)
@@ -1171,26 +1182,27 @@ names:
                      width=15).pack(side=tk.LEFT)
 
         # 进度显示 - 改为文本显示
-        progress_frame = ttk.LabelFrame(main_frame, text="训练进度", padding="10")
-        progress_frame.pack(fill=tk.X, pady=(0, 15))
+        progress_frame = ttk.LabelFrame(main_frame, text="训练进度", padding="6")
+        progress_frame.pack(fill=tk.X, pady=(0, 8))
 
         # 进度信息 - 显示当前训练轮次/总训练轮次
         progress_info_frame = ttk.Frame(progress_frame)
         progress_info_frame.pack(fill=tk.X, pady=2)
 
         self.epoch_info = tk.StringVar(value="等待开始...")
-        ttk.Label(progress_info_frame, textvariable=self.epoch_info, font=('微软雅黑', 10, 'bold')).pack(side=tk.LEFT,
+        ttk.Label(progress_info_frame, textvariable=self.epoch_info, font=ui_theme.ui_font(10, True)).pack(side=tk.LEFT,
                                                                                                          padx=5)
 
         self.loss_info = tk.StringVar(value="")
         ttk.Label(progress_info_frame, textvariable=self.loss_info).pack(side=tk.RIGHT, padx=5)
 
         # 命令预览
-        preview_frame = ttk.LabelFrame(main_frame, text="命令预览", padding="10")
-        preview_frame.pack(fill=tk.X, pady=(0, 15))
+        preview_frame = ttk.LabelFrame(main_frame, text="命令预览", padding="6")
+        preview_frame.pack(fill=tk.X, pady=(0, 8))
 
-        self.preview_text = ScrolledText(preview_frame, height=3, font=('Consolas', 9))
+        self.preview_text = ScrolledText(preview_frame, height=2, font=ui_theme.mono_font(9))
         self.preview_text.pack(fill=tk.X)
+        ui_theme.style_text(self.preview_text)
         self.update_train_preview()
 
         # 绑定更新预览
@@ -1203,23 +1215,23 @@ names:
 
         # 训练控制
         control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 15))
+        control_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.train_btn = ttk.Button(control_frame, text="▶ 开始训练", command=self.start_training,
-                                    width=15)
+                                    style="Primary.TButton", width=15)
         self.train_btn.pack(side=tk.LEFT, padx=5)
 
         self.stop_btn = ttk.Button(control_frame, text="⏹ 停止训练", command=self.stop_training,
-                                   state=tk.DISABLED, width=15)
+                                   style="Danger.TButton", state=tk.DISABLED, width=15)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
         # 训练输出
-        output_frame = ttk.LabelFrame(main_frame, text="训练输出", padding="10")
+        output_frame = ttk.LabelFrame(main_frame, text="训练输出", padding="6")
         output_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.train_output = ScrolledText(output_frame, height=12, font=('Consolas', 9),
-                                         bg='#1e1e1e', fg='#d4d4d4')
+        self.train_output = ScrolledText(output_frame, height=12, font=ui_theme.mono_font(9))
         self.train_output.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.train_output, dark=True)
 
     def browse_train_dataset(self):
         """浏览训练数据集目录"""
@@ -1287,7 +1299,7 @@ names:
         # 根据模型类型构建不同的命令
         if model_name.startswith("yolov5"):
             cmd = [
-                "python",
+                self._python_exe(),
                 os.path.join(yolov5_dir, "train.py"),
                 "--data", data_yaml,
                 "--weights", model_path,
@@ -1314,9 +1326,12 @@ names:
             ]
 
         self.train_output.delete('1.0', tk.END)
-        self.train_output.insert('1.0', f"🚀 开始训练...\n")
-        self.train_output.insert('1.0', f"📁 结果将保存到: {os.path.join(self.train_dataset.get(), 'runs/detect')}\n")
-        self.train_output.insert('1.0', "=" * 50 + "\n")
+        header = (
+            "=" * 50 + "\n"
+            + "🚀 开始训练...\n"
+            + f"📁 结果将保存到: {os.path.join(self.train_dataset.get(), 'runs/detect')}\n"
+        )
+        self.train_output.insert('1.0', header)
 
         self.train_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
@@ -1333,7 +1348,7 @@ names:
                     stderr=subprocess.STDOUT,
                     universal_newlines=False,
                     bufsize=1,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=_NO_WINDOW
                 )
                 self.train_process = process
 
@@ -1344,13 +1359,7 @@ names:
 
                 for line in process.stdout:
                     try:
-                        try:
-                            decoded_line = line.decode('utf-8', errors='ignore')
-                        except:
-                            try:
-                                decoded_line = line.decode('gbk', errors='ignore')
-                            except:
-                                decoded_line = line.decode('latin-1', errors='ignore')
+                        decoded_line = decode_output_line(line)
 
                         clean_line = ansi_escape.sub('', decoded_line)
 
@@ -1454,12 +1463,12 @@ names:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
-        title = ttk.Label(main_frame, text="🧪 模型测试", font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
-        title.pack(anchor=tk.W, pady=(0, 20))
+        title = ttk.Label(main_frame, text="🧪 模型测试", style="PageTitle.TLabel")
+        title.pack(anchor=tk.W, pady=(0, 12))
 
         # 模型选择
         model_frame = ttk.LabelFrame(main_frame, text="模型选择", padding="15")
-        model_frame.pack(fill=tk.X, pady=(0, 15))
+        model_frame.pack(fill=tk.X, pady=(0, 8))
 
         row1 = ttk.Frame(model_frame)
         row1.pack(fill=tk.X, pady=2)
@@ -1473,7 +1482,7 @@ names:
 
         # 测试数据
         data_frame = ttk.LabelFrame(main_frame, text="测试数据", padding="15")
-        data_frame.pack(fill=tk.X, pady=(0, 15))
+        data_frame.pack(fill=tk.X, pady=(0, 8))
 
         row2 = ttk.Frame(data_frame)
         row2.pack(fill=tk.X, pady=2)
@@ -1489,7 +1498,7 @@ names:
 
         # 参数设置
         param_frame = ttk.LabelFrame(main_frame, text="测试参数", padding="15")
-        param_frame.pack(fill=tk.X, pady=(0, 15))
+        param_frame.pack(fill=tk.X, pady=(0, 8))
 
         row3 = ttk.Frame(param_frame)
         row3.pack(fill=tk.X, pady=2)
@@ -1504,14 +1513,14 @@ names:
 
         # 测试控制
         control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 15))
+        control_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.test_btn = ttk.Button(control_frame, text="▶ 开始测试", command=self.start_test,
-                                   width=15)
+                                   style="Primary.TButton", width=15)
         self.test_btn.pack(side=tk.LEFT, padx=5)
 
         self.test_stop_btn = ttk.Button(control_frame, text="⏹ 停止测试", command=self.stop_test,
-                                        state=tk.DISABLED, width=15)
+                                        style="Danger.TButton", state=tk.DISABLED, width=15)
         self.test_stop_btn.pack(side=tk.LEFT, padx=5)
 
         # 创建左右分栏
@@ -1522,31 +1531,23 @@ names:
         left_frame = ttk.Frame(paned)
         paned.add(left_frame, weight=1)
 
-        output_frame = ttk.LabelFrame(left_frame, text="测试输出", padding="10")
+        output_frame = ttk.LabelFrame(left_frame, text="测试输出", padding="6")
         output_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.test_output = ScrolledText(output_frame, height=12, font=('Consolas', 9),
-                                        bg='#1e1e1e', fg='#d4d4d4')
+        self.test_output = ScrolledText(output_frame, height=12, font=ui_theme.mono_font(9))
         self.test_output.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.test_output, dark=True)
 
         # 右侧 - 图片预览
         right_frame = ttk.Frame(paned)
         paned.add(right_frame, weight=1)
 
-        preview_frame = ttk.LabelFrame(right_frame, text="检测结果预览", padding="10")
+        preview_frame = ttk.LabelFrame(right_frame, text="检测结果预览", padding="6")
         preview_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 预览画布
-        self.preview_canvas = tk.Canvas(preview_frame, bg='white', highlightthickness=1,
-                                        highlightbackground='#ccc')
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=5)
-
-        self.preview_image_label = ttk.Label(self.preview_canvas)
-        self.preview_image_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
-
-        # 预览控制
+        # 预览控制（先于画布打包，保证窗口较小时不被挤压隐藏）
         preview_control = ttk.Frame(preview_frame)
-        preview_control.pack(fill=tk.X, pady=5)
+        preview_control.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
         self.prev_btn = ttk.Button(preview_control, text="◀ 上一张",
                                    command=self.prev_image, state=tk.DISABLED)
@@ -1558,6 +1559,14 @@ names:
 
         self.preview_info = ttk.Label(preview_control, text="")
         self.preview_info.pack(side=tk.BOTTOM, pady=2)
+
+        # 预览画布
+        self.preview_canvas = tk.Canvas(preview_frame, bg=ui_theme.COLORS["log_bg"], highlightthickness=1,
+                                        highlightbackground=ui_theme.COLORS["border"])
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        self.preview_image_label = ttk.Label(self.preview_canvas)
+        self.preview_image_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
         # 绑定画布大小变化事件，以便重新调整预览图片
         self.preview_canvas.bind('<Configure>', self.on_canvas_configure)
@@ -1660,11 +1669,14 @@ names:
             ]
 
         self.test_output.delete('1.0', tk.END)
-        self.test_output.insert('1.0', f"🔍 开始测试...\n")
-        self.test_output.insert('1.0', f"模型: {self.test_model.get()}\n")
-        self.test_output.insert('1.0', f"测试源: {self.test_source.get()}\n")
-        self.test_output.insert('1.0', f"数据集根目录: {dataset_root}\n")
-        self.test_output.insert('1.0', "=" * 50 + "\n")
+        header = (
+            "=" * 50 + "\n"
+            + "🔍 开始测试...\n"
+            + f"模型: {self.test_model.get()}\n"
+            + f"测试源: {self.test_source.get()}\n"
+            + f"数据集根目录: {dataset_root}\n"
+        )
+        self.test_output.insert('1.0', header)
 
         self.test_btn.config(state=tk.DISABLED)
         self.test_stop_btn.config(state=tk.NORMAL)
@@ -1674,31 +1686,23 @@ names:
                 import re
                 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-                # 将命令列表转换为字符串，使用shell=True执行conda run
-                cmd_str = ' '.join(cmd)
-
+                # 命令为直接调用可执行文件（python / yolo），使用列表形式避免 shell 解析路径
                 process = subprocess.Popen(
-                    cmd_str,
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     universal_newlines=False,
                     bufsize=1,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    shell=True,
+                    creationflags=_NO_WINDOW,
+                    shell=False,
                     cwd=os.getcwd()
                 )
                 self.test_process = process
 
                 for line in process.stdout:
                     try:
-                        # 尝试多种编码解码
-                        try:
-                            decoded_line = line.decode('utf-8', errors='ignore')
-                        except:
-                            try:
-                                decoded_line = line.decode('gbk', errors='ignore')
-                            except:
-                                decoded_line = line.decode('latin-1', errors='ignore')
+                        # 解码输出行（自动兼容 utf-8 / gbk）
+                        decoded_line = decode_output_line(line)
 
                         # 移除ANSI转义序列
                         clean_line = ansi_escape.sub('', decoded_line)
@@ -1830,12 +1834,12 @@ names:
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
-        title = ttk.Label(main_frame, text="📦 模型导出", font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
-        title.pack(anchor=tk.W, pady=(0, 20))
+        title = ttk.Label(main_frame, text="📦 模型导出", style="PageTitle.TLabel")
+        title.pack(anchor=tk.W, pady=(0, 12))
 
         # 模型选择
         model_frame = ttk.LabelFrame(main_frame, text="源模型", padding="15")
-        model_frame.pack(fill=tk.X, pady=(0, 15))
+        model_frame.pack(fill=tk.X, pady=(0, 8))
 
         row1 = ttk.Frame(model_frame)
         row1.pack(fill=tk.X, pady=2)
@@ -1849,7 +1853,7 @@ names:
 
         # 导出参数
         param_frame = ttk.LabelFrame(main_frame, text="导出参数", padding="15")
-        param_frame.pack(fill=tk.X, pady=(0, 15))
+        param_frame.pack(fill=tk.X, pady=(0, 8))
 
         row2 = ttk.Frame(param_frame)
         row2.pack(fill=tk.X, pady=2)
@@ -1871,7 +1875,7 @@ names:
 
         # 精度选择
         precision_frame = ttk.LabelFrame(main_frame, text="精度设置", padding="15")
-        precision_frame.pack(fill=tk.X, pady=(0, 15))
+        precision_frame.pack(fill=tk.X, pady=(0, 8))
 
         row4 = ttk.Frame(precision_frame)
         row4.pack(fill=tk.X, pady=2)
@@ -1887,19 +1891,19 @@ names:
 
         # 导出按钮
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=(0, 15))
+        btn_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.export_btn = ttk.Button(btn_frame, text="📦 导出模型", command=self.export_model_func,
-                                     width=15)
+                                     style="Primary.TButton", width=15)
         self.export_btn.pack(side=tk.LEFT, padx=5)
 
         # 导出输出
-        output_frame = ttk.LabelFrame(main_frame, text="导出输出", padding="10")
+        output_frame = ttk.LabelFrame(main_frame, text="导出输出", padding="6")
         output_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.export_output = ScrolledText(output_frame, height=10, font=('Consolas', 9),
-                                          bg='#1e1e1e', fg='#d4d4d4')
+        self.export_output = ScrolledText(output_frame, height=10, font=ui_theme.mono_font(9))
         self.export_output.pack(fill=tk.BOTH, expand=True)
+        ui_theme.style_text(self.export_output, dark=True)
 
     def browse_export_model(self):
         """浏览导出模型"""
@@ -1931,11 +1935,14 @@ names:
         ]
 
         self.export_output.delete('1.0', tk.END)
-        self.export_output.insert('1.0', f"📦 开始导出...\n")
-        self.export_output.insert('1.0', f"模型: {self.export_model.get()}\n")
-        self.export_output.insert('1.0', f"格式: {self.export_format.get()}\n")
-        self.export_output.insert('1.0', f"精度: {self.export_precision.get()}\n")
-        self.export_output.insert('1.0', "=" * 50 + "\n")
+        header = (
+            "=" * 50 + "\n"
+            + "📦 开始导出...\n"
+            + f"模型: {self.export_model.get()}\n"
+            + f"格式: {self.export_format.get()}\n"
+            + f"精度: {self.export_precision.get()}\n"
+        )
+        self.export_output.insert('1.0', header)
 
         self.export_btn.config(state=tk.DISABLED)
 
@@ -1950,12 +1957,12 @@ names:
                     stderr=subprocess.STDOUT,
                     universal_newlines=False,
                     bufsize=1,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=_NO_WINDOW
                 )
 
                 for line in process.stdout:
                     try:
-                        decoded_line = line.decode('utf-8', errors='ignore')
+                        decoded_line = decode_output_line(line)
                         clean_line = ansi_escape.sub('', decoded_line)
                         if clean_line.strip():
                             self.root.after(0, self.append_export_output, clean_line)

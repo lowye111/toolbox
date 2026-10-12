@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import codecs
+import shutil
 import hashlib
 import queue
 import threading
@@ -11,8 +13,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 
-# 引入根目录的环境检测模块（复用 config.json）
+# 引入根目录的环境检测模块（复用 config.json）与统一 UI 主题
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ui_theme
 try:
     import env_check
 except Exception:
@@ -21,6 +24,16 @@ except Exception:
 VERSION = "AI 识别版"
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+
+
+def debug_log(message):
+    """调试输出：pythonw 启动时 sys.stdout 为 None，直接 print 会抛异常中断扫描，这里做保护"""
+    if sys.stdout is None:
+        return
+    try:
+        print(message)
+    except Exception:
+        pass
 
 # 强化匹配规则，确保单冒号参数不遗漏
 PATTERNS = {
@@ -39,14 +52,135 @@ EXCLUDE_PATTERNS = [
 ]
 
 
+def read_file_with_meta(path):
+    """读取文件，返回 (lines, encoding)。
+
+    保留原始行尾（LF/CRLF 不被翻译）并记录原编码，供 write_file_lines 原样写回，
+    避免把 GBK 源文件静默转成 UTF-8、或把 LF 文件整篇改成 CRLF。
+    """
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if raw.startswith(codecs.BOM_UTF8):
+        try:
+            return raw.decode('utf-8-sig').splitlines(keepends=True), 'utf-8-sig'
+        except UnicodeDecodeError:
+            pass
+    for enc in ('utf-8', 'gbk'):
+        try:
+            return raw.decode(enc).splitlines(keepends=True), enc
+        except UnicodeDecodeError:
+            continue
+    # 兜底：仍按 utf-8 强解，保证工具可用（替换字符只在极端情况下出现）
+    return raw.decode('utf-8', 'replace').splitlines(keepends=True), 'utf-8'
+
+
 def read_file_lines(path):
     """读取文件行：utf-8 优先，兼容 gbk（Windows 中文文件）"""
+    return read_file_with_meta(path)[0]
+
+
+def write_file_lines(path, lines, encoding):
+    """按原编码、原行尾写回文件；写前先备份为同名 .bak。
+
+    用二进制写入，避免 text 模式把 LF 翻译成 CRLF。
+    """
+    data = "".join(lines).encode(encoding)
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.readlines()
-    except UnicodeDecodeError:
-        with open(path, 'r', encoding='gbk') as f:
-            return f.readlines()
+        shutil.copy2(path, path + ".bak")   # 每次保存前留一份原始备份
+    except Exception:
+        pass
+    # 原子写：先写临时文件再替换，避免写到一半崩溃/断电把用户源码留成半截
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _find_value_end(line, start, colon_mode):
+    """从取值起点扫描到该取值结束位置。
+
+    跳过字符串/字符字面量与括号嵌套，遇到行内注释（// 或 #）或语句结束符即停：
+    - C/C++ 风格（colon_mode=False）：以 depth==0 的 ';' 结束
+    - 冒号风格（YAML/INI，colon_mode=True）：以 depth==0 的 ',' 或行尾结束
+    """
+    i = start
+    n = len(line)
+    quote = None
+    depth = 0
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in '"\'':
+            quote = ch
+            i += 1
+            continue
+        if ch == '#' or (ch == '/' and i + 1 < n and line[i + 1] == '/'):
+            return i
+        if ch in '([{':
+            depth += 1
+            i += 1
+            continue
+        if ch in ')]}':
+            if depth > 0:
+                depth -= 1
+            i += 1
+            continue
+        if depth == 0:
+            if ch == ';' and not colon_mode:
+                return i
+            if ch == ',' and colon_mode:
+                return i
+        i += 1
+    return n
+
+
+def _splice_value(line, value_start, new_value, colon_mode):
+    """把 [value_start, 取值末尾) 换成 new_value，其余（同行其它语句、注释、空白）原样保留"""
+    end = _find_value_end(line, value_start, colon_mode)
+    while end > value_start and line[end - 1] in ' \t':
+        end -= 1      # 取值后的空白留给原行，避免吞掉间隔
+    return line[:value_start] + new_value + line[end:]
+
+
+def replace_param_value(line, name, new_value):
+    """只替换指定参数的取值片段，返回新行；无法安全定位时返回 None。
+
+    支持 `NAME = v`、`NAME: v`（YAML/INI）与 `#define NAME v` 三种形式。
+    """
+    esc = re.escape(name)
+
+    # 1) 宏：#define NAME value（没有等号）
+    m = re.match(r'(\s*#\s*define\s+)' + esc + r'(?![A-Za-z0-9_])([ \t]+)', line)
+    if m:
+        value_start = m.end()
+        if value_start < len(line) and line[value_start] == '(':
+            return None      # 函数式宏（#define F(x) ...），不做自动改写
+        return _splice_value(line, value_start, new_value, colon_mode=False)
+
+    # 2) NAME = value / NAME: value（跳过 ==、!=、<=、>= 这类比较）
+    for m in re.finditer(r'(?<![A-Za-z0-9_])' + esc + r'(?![A-Za-z0-9_])[ \t]*(==|!=|<=|>=|=|:)[ \t]*', line):
+        sep = m.group(1)
+        if sep in ('==', '!=', '<=', '>='):
+            continue
+        return _splice_value(line, m.end(), new_value, colon_mode=(sep == ':'))
+    return None
 
 
 def make_param(path, line_num, type_name, name, value, original_line):
@@ -59,6 +193,8 @@ def make_param(path, line_num, type_name, name, value, original_line):
         "hidden": False,
         "ai_note": "", "ai_filtered": False, "ai_recommend": False,
         "note_manual": "",
+        # 已成功写回磁盘时记录"原值"，供调参日志统计真正落盘的修改
+        "saved_from": None,
     }
 
 
@@ -67,7 +203,7 @@ def scan_file(path):
     try:
         lines = read_file_lines(path)
     except Exception as e:
-        print(f"读取文件失败：{path} - {e}")
+        debug_log(f"读取文件失败：{path} - {e}")
         return results
 
     in_enum = False
@@ -159,7 +295,7 @@ def scan_file(path):
         line_num += 1
 
     # 打印扫描结果，方便调试（可删除）
-    print(f"文件 {os.path.basename(path)} 扫描到 {len(results)} 个参数")
+    debug_log(f"文件 {os.path.basename(path)} 扫描到 {len(results)} 个参数")
     return results
 
 
@@ -199,8 +335,13 @@ def match_param_line(line):
     return None
 
 
-# 扫描时跳过的构建产物目录（ROS 的 devel/build/install 等，避免扫到自动生成的样板文件）
-SKIP_DIRS = {"devel", "build", "install"}
+# 扫描时跳过的目录（ROS 构建产物 devel/build/install，以及版本库/缓存/依赖目录，
+# 避免扫到自动生成的样板文件或第三方代码）
+SKIP_DIRS = {
+    "devel", "build", "install",
+    ".git", ".svn", ".hg", "__pycache__", "node_modules",
+    ".idea", ".vscode", ".venv", "venv", "site-packages",
+}
 
 
 def scan_folder(folder):
@@ -256,7 +397,7 @@ def save_param(item, new_value):
     name = item["name"]
 
     try:
-        lines = read_file_lines(fp)
+        lines, encoding = read_file_with_meta(fp)
     except Exception as e:
         messagebox.showerror("错误", f"读取文件失败：{e}")
         return False
@@ -266,27 +407,15 @@ def save_param(item, new_value):
         return False
 
     line = lines[line_idx]
-
-    # 支持保存单冒号；保留行尾注释（// 或 #）
-    suffix_re = r'(\s*;?\s*(?:#|//).*|\s*;?\s*)$'
-    if ":" in line:
-        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*:\s*)(.*?)' + suffix_re, re.DOTALL)
-    else:
-        pattern = re.compile(r'(\s*' + re.escape(name) + r'\s*=\s*)(.*?)' + suffix_re, re.DOTALL)
-
-    match = pattern.search(line)
-    if not match:
-        messagebox.showerror("错误", "未找到参数格式")
+    new_line = replace_param_value(line, name, new_value)
+    if new_line is None:
+        messagebox.showerror("错误", f"未找到参数 {name} 的可替换取值位置（该行可能已被外部修改，或该宏是函数式宏）")
         return False
 
-    # 保留匹配区域之外的内容（行首的类型修饰词如 float/static、行尾换行等）
-    prefix = match.group(1)
-    suffix = match.group(3)
-    lines[line_idx] = line[:match.start()] + prefix + new_value + suffix + line[match.end():]
+    lines[line_idx] = new_line
 
     try:
-        with open(fp, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
+        write_file_lines(fp, lines, encoding)
     except Exception as e:
         messagebox.showerror("错误", f"保存文件失败：{e}")
         return False
@@ -294,15 +423,20 @@ def save_param(item, new_value):
     return True
 
 
-def generate_tune_log(param_map):
+def generate_tune_log(param_map, quiet=False):
+    """生成调参日志：统计本次真正写回磁盘的修改（saved_from 非空）。
+
+    quiet=True 时（关闭窗口自动调用）没有任何修改就静默返回，不弹窗。
+    """
     modified = []
     for params in param_map.values():
         for p in params:
-            if p["new_value"] is not None and p["new_value"] != p["value"]:
+            if p.get("saved_from") is not None and p["saved_from"] != p["value"]:
                 modified.append(p)
 
     if not modified:
-        messagebox.showinfo("提示", "本次未修改任何参数")
+        if not quiet:
+            messagebox.showinfo("提示", "本次未修改任何参数")
         return
 
     today = datetime.now().strftime("%m%d")
@@ -317,10 +451,13 @@ def generate_tune_log(param_map):
             f.write(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"修改总数：{len(modified)}\n\n")
             for i, p in enumerate(modified, 1):
-                f.write(f"【{i}】\n文件：{p['file_name']}\n参数：{p['name']}\n原值：{p['value']}\n新值：{p['new_value']}\n\n")
-        messagebox.showinfo("成功", f"日志已生成：{fname}")
+                f.write(f"【{i}】\n文件：{p['file_name']}\n参数：{p['name']}\n"
+                        f"原值：{p['saved_from']}\n新值：{p['value']}\n\n")
+        if not quiet:
+            messagebox.showinfo("成功", f"日志已生成：{fname}")
     except Exception as e:
-        messagebox.showerror("错误", f"日志生成失败：{e}")
+        if not quiet:
+            messagebox.showerror("错误", f"日志生成失败：{e}")
 
 
 # ==================== AI 识别（DeepSeek） ====================
@@ -388,15 +525,29 @@ def load_notes(notes_path):
         return {}
 
 
-def save_notes(notes_path, notes):
-    """保存说明文件（自动创建目录），成功返回 True"""
+def _write_json_atomic(path, payload):
+    """原子写 JSON：先写临时文件再替换，避免崩溃时把说明/会话文件留成半截损坏"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = path + ".tmp"
     try:
-        os.makedirs(os.path.dirname(notes_path), exist_ok=True)
-        with open(notes_path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "notes": notes}, f, ensure_ascii=False, indent=2)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
         return True
     except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
         return False
+
+
+def save_notes(notes_path, notes):
+    """保存说明文件（自动创建目录），成功返回 True"""
+    return _write_json_atomic(notes_path, {"version": 1, "notes": notes})
 
 
 def workspace_session_path(folder):
@@ -419,13 +570,7 @@ def load_session(session_path):
 
 def save_session_file(session_path, session):
     """保存会话状态文件（自动创建目录），成功返回 True"""
-    try:
-        os.makedirs(os.path.dirname(session_path), exist_ok=True)
-        with open(session_path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, **session}, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
+    return _write_json_atomic(session_path, {"version": 1, **session})
 
 
 def _ssl_context():
@@ -567,7 +712,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"参数编辑工具 {VERSION}")
-        self.geometry("1100x700")
+        ui_theme.apply(self)
+        ui_theme.center(self, 1100, 800, min_w=940, min_h=600)
         self.param_map = {}
         self.all_files = []
         self.current_file = ""
@@ -584,54 +730,63 @@ class App(tk.Tk):
         self.ai_filtered_tag = "ai_filtered"
         self.item_map = {}  # (tree, item_id) -> 参数项
         self.ai_queue = queue.Queue()  # AI 识别线程 -> 主线程消息队列
+        self._ai_total = 0
+        self.ai_done_count = 0
+        self._ai_total_f = self._ai_total_a = self._ai_total_r = 0
+        self._ai_errors = []
         self.selected_param = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # 顶部控件
-        top_frame = tk.Frame(self)
-        top_frame.pack(fill=tk.X, padx=5, pady=5)
+        # 顶部工具栏
+        c = ui_theme.COLORS
+        top_frame = tk.Frame(self, bg=c["bg"])
+        top_frame.pack(fill=tk.X, padx=12, pady=(12, 4))
 
-        row1 = tk.Frame(top_frame)
+        row1 = tk.Frame(top_frame, bg=c["bg"])
         row1.pack(fill=tk.X)
-        self.btn_select_folder = tk.Button(row1, text="选择文件夹", command=self.select_folder)
-        self.btn_select_folder.pack(side=tk.LEFT, padx=5)
-        self.btn_ai = tk.Button(row1, text="🤖 AI 识别", command=self.ai_scan_all)
-        self.btn_ai.pack(side=tk.LEFT, padx=5)
-        self.btn_apply_rec = tk.Button(row1, text="📌 采用AI推荐", command=self.apply_ai_recommend)
-        self.btn_apply_rec.pack(side=tk.LEFT, padx=5)
+        self.btn_select_folder = ttk.Button(row1, text="📂 选择文件夹", style="Primary.TButton",
+                                            command=self.select_folder)
+        self.btn_select_folder.pack(side=tk.LEFT)
+        self.btn_ai = ttk.Button(row1, text="🤖 AI 识别", style="Success.TButton", command=self.ai_scan_all)
+        self.btn_ai.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_apply_rec = ttk.Button(row1, text="📌 采用AI推荐", command=self.apply_ai_recommend)
+        self.btn_apply_rec.pack(side=tk.LEFT, padx=(8, 0))
         self.show_filtered_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(row1, text="显示AI过滤项", variable=self.show_filtered_var,
-                       command=self.refresh_tables).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(row1, text="显示AI过滤项", variable=self.show_filtered_var,
+                        command=self.refresh_tables).pack(side=tk.LEFT, padx=12)
+        self.show_hidden_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row1, text="显示隐藏项", variable=self.show_hidden_var,
+                        command=self.refresh_tables).pack(side=tk.LEFT)
         self.ai_status_var = tk.StringVar(value="")
-        tk.Label(row1, textvariable=self.ai_status_var, fg="#1a73e8").pack(side=tk.LEFT, padx=10)
-        self.ai_progress = ttk.Progressbar(row1, orient="horizontal", length=170, mode="determinate")
+        ttk.Label(row1, textvariable=self.ai_status_var, style="Accent.TLabel").pack(side=tk.LEFT, padx=6)
+        self.ai_progress = ttk.Progressbar(row1, orient="horizontal", length=160, mode="determinate")
         self.ai_progress.pack(side=tk.LEFT, padx=(0, 10))
 
         # 右上角：文件名搜索（实时过滤标签栏）
         self.search_var = tk.StringVar(value="")
         search_entry = ttk.Entry(row1, textvariable=self.search_var, width=18)
-        search_entry.pack(side=tk.RIGHT, padx=(0, 8))
-        tk.Label(row1, text="🔍 文件名：").pack(side=tk.RIGHT)
-        self.btn_restore = tk.Button(row1, text="↩ 恢复关闭文件", command=self.restore_closed_files)
-        self.btn_restore.pack(side=tk.RIGHT, padx=(0, 6))
+        search_entry.pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(row1, text="🔍 文件名：", style="Tip.TLabel").pack(side=tk.RIGHT)
+        self.btn_restore = ttk.Button(row1, text="↩ 恢复关闭文件", command=self.restore_closed_files)
+        self.btn_restore.pack(side=tk.RIGHT, padx=(0, 10))
         self.search_var.trace("w", lambda *a: self.apply_tab_filter())
 
         self.info_label = tk.Label(
             top_frame,
             text="未选择文件夹 | 支持 .h/.c/.cpp/.yaml/.ini 等文件 | 单冒号=参数，双冒号=跳过 | AI 识别需在 config.json 填写 deepseek_api_key",
-            anchor="w")
-        self.info_label.pack(fill=tk.X, padx=5, pady=(4, 0))
+            anchor="w", bg=c["bg"], fg=c["text_muted"], font=ui_theme.ui_font(9))
+        self.info_label.pack(fill=tk.X, pady=(6, 0))
 
         # 文件标签栏（多行自动换行 + 垂直滚动 + 每个文件可关闭）
         # 不用单行横向滚动：文件很多时单行总宽度会超过 Tk 坐标上限（约32767像素），后端会截断显示
-        tab_frame = tk.Frame(self, bg="#eee")
-        tab_frame.pack(fill=tk.X, padx=5)
-        self.tab_canvas = tk.Canvas(tab_frame, bg="#eee", height=34, highlightthickness=0)
+        tab_frame = tk.Frame(self, bg=c["bg"])
+        tab_frame.pack(fill=tk.X, padx=12, pady=(2, 0))
+        self.tab_canvas = tk.Canvas(tab_frame, bg=c["bg"], height=36, highlightthickness=0)
         self.tab_scroll = ttk.Scrollbar(tab_frame, orient=tk.VERTICAL, command=self.tab_canvas.yview)
         self.tab_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tab_canvas.configure(yscrollcommand=self.tab_scroll.set)
-        self.tab_inner = tk.Frame(self.tab_canvas, bg="#eee")
+        self.tab_inner = tk.Frame(self.tab_canvas, bg=c["bg"])
         self._tab_win = self.tab_canvas.create_window((0, 0), window=self.tab_inner, anchor="nw")
         self.tab_canvas.bind("<MouseWheel>", self._tab_wheel)
         self.tab_canvas.bind("<Configure>", self._on_tab_resize)
@@ -640,21 +795,48 @@ class App(tk.Tk):
         self.tab_groups = {}   # 分组名 -> 标题控件（文件多时按类型分组）
         self.expanded_groups = set()  # 已展开的分组（默认折叠）
 
+        # 底部编辑区（先于双栏面板打包，保证窗口较小时不被挤压隐藏）
+        bot_frame = tk.Frame(self, bg=c["surface"], highlightthickness=1,
+                             highlightbackground=c["border"], highlightcolor=c["border"])
+        bot_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(4, 10))
+        tk.Label(bot_frame, text="新值：", bg=c["surface"], fg=c["text"],
+                 font=ui_theme.ui_font(10)).pack(side=tk.LEFT, padx=(10, 0), pady=6)
+        self.entry_val = ttk.Entry(bot_frame)
+        self.entry_val.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=6)
+        self.entry_val.bind("<Return>", lambda e: self.apply_val())
+        self.btn_apply = ttk.Button(bot_frame, text="应用", style="Primary.TButton",
+                                    state=tk.DISABLED, command=self.apply_val)
+        self.btn_apply.pack(side=tk.LEFT, padx=3, pady=6)
+        self.btn_save = ttk.Button(bot_frame, text="保存选中", state=tk.DISABLED, command=self.save_one)
+        self.btn_save.pack(side=tk.LEFT, padx=3, pady=6)
+        self.btn_save_all = ttk.Button(bot_frame, text="💾 保存全部", style="Success.TButton",
+                                       state=tk.DISABLED, command=self.save_all)
+        self.btn_save_all.pack(side=tk.LEFT, padx=3, pady=6)
+
+        # 手动说明（选中参数后填写，回车/失焦自动保存）
+        self.entry_note = ttk.Entry(bot_frame, width=36)
+        self.entry_note.pack(side=tk.RIGHT, padx=(0, 10), pady=6)
+        tk.Label(bot_frame, text="📝 说明：", bg=c["surface"], fg=c["text"],
+                 font=ui_theme.ui_font(10)).pack(side=tk.RIGHT)
+        self.entry_note.bind("<Return>", lambda e: self.save_note())
+        self.entry_note.bind("<FocusOut>", lambda e: self.save_note())
+
         # 双栏面板
-        paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6)
-        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        paned = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6, sashrelief=tk.FLAT,
+                               bd=0, bg=c["bg"])
+        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 0))
 
         # 预调栏
-        prio_frame = tk.Frame(paned)
+        prio_frame = tk.Frame(paned, bg=c["bg"])
         paned.add(prio_frame, minsize=160)
-        tk.Label(prio_frame, text="📌 预调整栏", font=("", 10, "bold")).pack(anchor="w")
+        ttk.Label(prio_frame, text="📌 预调整栏", style="Section.TLabel").pack(anchor="w", pady=(2, 2))
         cols = ("type", "name", "value", "note", "pos", "up", "del")
         col_defs = [("type", 70, "类型"), ("name", 200, "参数名"), ("value", 150, "值"),
                     ("note", 250, "说明"), ("pos", 100, "位置"), ("up", 36, "↑"), ("del", 36, "×")]
         self.tree_prio = ttk.Treeview(prio_frame, columns=cols, show="headings", height=6, selectmode="browse")
-        for c, w, t in col_defs:
-            self.tree_prio.heading(c, text=t)
-            self.tree_prio.column(c, width=w, anchor="center")
+        for col, w, t in col_defs:
+            self.tree_prio.heading(col, text=t)
+            self.tree_prio.column(col, width=w, anchor="center")
         self.tree_prio.heading("up", text="↓")  # 预调栏：下箭头=退回参数列表
         self._config_tree_tags(self.tree_prio)
         self.tree_prio.pack(fill=tk.BOTH, expand=True, pady=2)
@@ -662,38 +844,17 @@ class App(tk.Tk):
         self.tree_prio.bind("<ButtonRelease-1>", lambda e: self.on_click(True, e, self.tree_prio))
 
         # 参数列表
-        norm_frame = tk.Frame(paned)
+        norm_frame = tk.Frame(paned, bg=c["bg"])
         paned.add(norm_frame, minsize=200)
-        tk.Label(norm_frame, text="📋 参数列表", font=("", 10, "bold")).pack(anchor="w")
+        ttk.Label(norm_frame, text="📋 参数列表", style="Section.TLabel").pack(anchor="w", pady=(4, 2))
         self.tree_norm = ttk.Treeview(norm_frame, columns=cols, show="headings", height=12, selectmode="browse")
-        for c, w, t in col_defs:
-            self.tree_norm.heading(c, text=t)
-            self.tree_norm.column(c, width=w, anchor="center")
+        for col, w, t in col_defs:
+            self.tree_norm.heading(col, text=t)
+            self.tree_norm.column(col, width=w, anchor="center")
         self._config_tree_tags(self.tree_norm)
         self.tree_norm.pack(fill=tk.BOTH, expand=True, pady=2)
         self.tree_norm.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree_norm.bind("<ButtonRelease-1>", lambda e: self.on_click(False, e, self.tree_norm))
-
-        # 底部编辑区
-        bot_frame = tk.Frame(self)
-        bot_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(bot_frame, text="新值：").pack(side=tk.LEFT)
-        self.entry_val = tk.Entry(bot_frame)
-        self.entry_val.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.entry_val.bind("<Return>", lambda e: self.apply_val())
-        self.btn_apply = tk.Button(bot_frame, text="应用", state=tk.DISABLED, command=self.apply_val)
-        self.btn_apply.pack(side=tk.LEFT, padx=3)
-        self.btn_save = tk.Button(bot_frame, text="保存选中", state=tk.DISABLED, command=self.save_one)
-        self.btn_save.pack(side=tk.LEFT, padx=3)
-        self.btn_save_all = tk.Button(bot_frame, text="💾 保存全部", state=tk.DISABLED, command=self.save_all)
-        self.btn_save_all.pack(side=tk.LEFT, padx=3)
-
-        # 手动说明（选中参数后填写，回车/失焦自动保存）
-        self.entry_note = tk.Entry(bot_frame, width=36)
-        self.entry_note.pack(side=tk.RIGHT, padx=(0, 4))
-        tk.Label(bot_frame, text="📝 说明：").pack(side=tk.RIGHT)
-        self.entry_note.bind("<Return>", lambda e: self.save_note())
-        self.entry_note.bind("<FocusOut>", lambda e: self.save_note())
 
     def _config_tree_tags(self, tree):
         tree.tag_configure(self.unsaved_tag, background="#fff3cd")
@@ -703,7 +864,7 @@ class App(tk.Tk):
     def on_close(self):
         self.save_note()     # 保存尚在输入框中的说明
         self.save_session()  # 保存会话状态，下次打开同一工作区可恢复
-        generate_tune_log(self.param_map)
+        generate_tune_log(self.param_map, quiet=True)  # 有实际落盘修改才写日志，未改不弹窗
         self.destroy()
 
     def select_folder(self):
@@ -788,27 +949,32 @@ class App(tk.Tk):
 
     def _highlight_current_tab(self):
         """高亮当前选中的文件标签，其余恢复默认样式"""
+        c = ui_theme.COLORS
         for fp, btn in self.tab_buttons.items():
             if fp == self.current_file:
-                btn.config(bg="#1a73e8", fg="#ffffff",
-                           activebackground="#1667c8", activeforeground="#ffffff")
+                btn.config(bg=c["primary"], fg="#ffffff",
+                           activebackground=c["primary_active"], activeforeground="#ffffff")
             else:
-                btn.config(bg="#f0f0f0", fg="#000000",
-                           activebackground="#e6e6e6", activeforeground="#000000")
+                btn.config(bg="#f0f3f9", fg=c["text"],
+                           activebackground=c["hover"], activeforeground=c["text"])
 
     def _create_tab(self, fp):
         """创建单个文件标签（右上角 × 可关闭）"""
+        c = ui_theme.COLORS
         fn = os.path.basename(fp)
-        holder = tk.Frame(self.tab_inner, bg="#eee")
-        btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1,
+        holder = tk.Frame(self.tab_inner, bg=c["bg"])
+        btn = tk.Button(holder, text=fn + "   ", padx=4, pady=1, relief=tk.FLAT, bd=0,
+                        bg="#f0f3f9", fg=c["text"],
+                        activebackground=c["hover"], activeforeground=c["text"],
+                        cursor="hand2", font=ui_theme.ui_font(9),
                         command=lambda p=fp: self.switch_file(p))
         btn.pack()
-        close = tk.Label(holder, text="×", fg="#999999", bg="#e2e2e2",
+        close = tk.Label(holder, text="×", fg=c["text_muted"], bg="#e2e8f1",
                          cursor="hand2", font=("", 8, "bold"))
         close.place(relx=1.0, rely=0.0, anchor="ne")
         close.bind("<Button-1>", lambda e, p=fp: self.close_file_tab(p))
-        close.bind("<Enter>", lambda e, w=close: w.config(fg="#d32f2f"))
-        close.bind("<Leave>", lambda e, w=close: w.config(fg="#999999"))
+        close.bind("<Enter>", lambda e, w=close: w.config(fg=c["danger"]))
+        close.bind("<Leave>", lambda e, w=close: w.config(fg=c["text_muted"]))
         for w in (holder, btn, close):
             w.bind("<MouseWheel>", self._tab_wheel)
         self.tab_widgets[fp] = holder
@@ -816,6 +982,7 @@ class App(tk.Tk):
 
     def rebuild_tabs(self):
         """重新创建文件标签（选文件夹/搜索过滤时调用；文件多时按类型分组）"""
+        c = ui_theme.COLORS
         # 清空现有标签
         for w in self.tab_inner.winfo_children():
             w.destroy()
@@ -832,8 +999,8 @@ class App(tk.Tk):
                 collapsed = gname not in self.expanded_groups
                 arrow = "▸" if collapsed else "▾"
                 header = tk.Label(self.tab_inner, text=f"📁 {gname}（{len(gfiles)} 个）{arrow}",
-                                  bg="#dce6f5", fg="#33475b", padx=6, pady=2,
-                                  font=("", 9, "bold"), cursor="hand2")
+                                  bg=c["primary_soft"], fg=c["text_secondary"], padx=6, pady=2,
+                                  font=ui_theme.ui_font(9, True), cursor="hand2")
                 header.bind("<Button-1>", lambda e, g=gname: self.toggle_group(g))
                 header.bind("<MouseWheel>", self._tab_wheel)
                 self.tab_groups[gname] = header
@@ -1007,9 +1174,10 @@ class App(tk.Tk):
             return
 
         show_filtered = self.show_filtered_var.get()
+        show_hidden = self.show_hidden_var.get()
 
         def visible(p):
-            if p["hidden"]:
+            if p["hidden"] and not show_hidden:
                 return False
             if p.get("ai_filtered") and not show_filtered:
                 return False
@@ -1077,8 +1245,8 @@ class App(tk.Tk):
                 # 预调栏×：退回参数列表
                 p["is_priority"] = False
             else:
-                # 参数列表×：隐藏参数
-                p["hidden"] = True
+                # 参数列表×：隐藏参数；已隐藏时再次点击=取消隐藏（配合"显示隐藏项"）
+                p["hidden"] = not p["hidden"]
             self.refresh_tables()
             self.save_session()
             return
@@ -1148,6 +1316,7 @@ class App(tk.Tk):
             return
         # 保存到文件
         if save_param(self.selected_param, self.selected_param["new_value"]):
+            self.selected_param["saved_from"] = self.selected_param["value"]  # 记录原值供调参日志
             self.selected_param["value"] = self.selected_param["new_value"]
             self.selected_param["new_value"] = None
             self.selected_param["is_modified"] = False
@@ -1164,6 +1333,7 @@ class App(tk.Tk):
         success_count = 0
         for p in modified_params:
             if save_param(p, p["new_value"]):
+                p["saved_from"] = p["value"]  # 记录原值供调参日志
                 p["value"] = p["new_value"]
                 p["new_value"] = None
                 p["is_modified"] = False
@@ -1193,8 +1363,10 @@ class App(tk.Tk):
 
     def _open_ai_select_dialog(self, files):
         """弹出文件选择窗口：勾选要 AI 识别的文件（默认勾选当前文件）"""
+        c = ui_theme.COLORS
         dlg = tk.Toplevel(self)
         dlg.title("AI 识别 - 选择文件")
+        dlg.configure(bg=c["bg"])
         dlg.transient(self)
         dlg.resizable(False, False)
         dlg.update_idletasks()
@@ -1208,10 +1380,11 @@ class App(tk.Tk):
         if groups:
             hint += "，点击 📁 分组名整组勾选"
         hint += "）："
-        tk.Label(dlg, text=hint, anchor="w").pack(fill=tk.X, padx=10, pady=(8, 4))
+        tk.Label(dlg, text=hint, anchor="w", bg=c["bg"], fg=c["text_secondary"],
+                 font=ui_theme.ui_font(9)).pack(fill=tk.X, padx=12, pady=(10, 4))
 
-        body = tk.Frame(dlg)
-        body.pack(fill=tk.BOTH, expand=True, padx=10)
+        body = tk.Frame(dlg, bg=c["bg"])
+        body.pack(fill=tk.BOTH, expand=True, padx=12)
         self._ai_tree = ttk.Treeview(body, columns=("chk", "name", "cnt"), show="headings",
                                      height=18, selectmode="browse")
         self._ai_tree.heading("chk", text="✓")
@@ -1220,7 +1393,7 @@ class App(tk.Tk):
         self._ai_tree.column("chk", width=36, anchor="center", stretch=False)
         self._ai_tree.column("name", width=340, anchor="w")
         self._ai_tree.column("cnt", width=56, anchor="center", stretch=False)
-        self._ai_tree.tag_configure("grouprow", background="#eef3fa")
+        self._ai_tree.tag_configure("grouprow", background=c["primary_soft"])
         sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._ai_tree.yview)
         self._ai_tree.configure(yscrollcommand=sb.set)
         self._ai_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1259,12 +1432,13 @@ class App(tk.Tk):
         if self.current_file in self._ai_items:
             self._ai_tree.see(self._ai_items[self.current_file])
 
-        btns = tk.Frame(dlg)
-        btns.pack(fill=tk.X, padx=10, pady=8)
-        tk.Button(btns, text="全选", width=8, command=self._ai_dialog_check_all).pack(side=tk.LEFT, padx=4)
-        tk.Button(btns, text="全不选", width=8, command=self._ai_dialog_uncheck_all).pack(side=tk.LEFT, padx=4)
-        tk.Button(btns, text="▶ 开始识别", width=12, command=self._ai_dialog_start).pack(side=tk.LEFT, padx=12)
-        tk.Button(btns, text="取消", width=8, command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+        btns = tk.Frame(dlg, bg=c["bg"])
+        btns.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Button(btns, text="全选", width=8, command=self._ai_dialog_check_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="全不选", width=8, command=self._ai_dialog_uncheck_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="▶ 开始识别", width=12, style="Primary.TButton",
+                   command=self._ai_dialog_start).pack(side=tk.LEFT, padx=12)
+        ttk.Button(btns, text="取消", width=8, command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
 
         self._ai_dlg = dlg
         self._ai_tree.bind("<Button-1>", self._ai_dialog_toggle)
@@ -1336,52 +1510,66 @@ class App(tk.Tk):
         """开始 AI 识别指定文件（后台线程 + 队列回传进度）"""
         api_key, model = get_ai_settings()
         self.btn_ai.config(state=tk.DISABLED)
+        # 归零统计量：所有合并/计数都发生在主线程的 _ai_poll 里
+        self._ai_total = len(files)
+        self.ai_done_count = 0
+        self._ai_total_f = self._ai_total_a = self._ai_total_r = 0
+        self._ai_errors = []
         self.ai_progress.config(maximum=len(files), value=0)
         self.ai_status_var.set(f"AI 识别准备中（共 {len(files)} 个文件）...")
         self.after(150, self._ai_poll)
         threading.Thread(target=self._ai_worker, args=(files, api_key, model), daemon=True).start()
 
     def _ai_worker(self, files, api_key, model):
-        """后台线程：只做网络与数据处理，所有进度通过队列交给主线程（不直接操作界面）"""
+        """后台线程：只做网络与文件读取，结果交主线程合并（不直接改共享参数/界面）"""
         total = len(files)
-        total_f = total_a = total_r = 0
-        errors = []
         try:
             for i, fp in enumerate(files, 1):
                 self.ai_queue.put(("start", i, total, os.path.basename(fp)))
                 try:
                     lines = read_file_lines(fp)
-                    params = self.param_map[fp]
+                    params = self.param_map.get(fp)
+                    if params is None:
+                        continue      # 工作区已切换，该文件不再存在
                     file_text = build_numbered_text(lines, params)
                     cand_text = "\n".join(f"{p['line']}: {p['name']}" for p in params)
                     ai_data = call_deepseek(file_text, cand_text, api_key, model)
-                    f, a, r = apply_ai_result(params, ai_data, lines, fp)
-                    total_f += f
-                    total_a += a
-                    total_r += r
+                    # 只把原始结果回传，由主线程合并进参数列表
+                    self.ai_queue.put(("apply", fp, ai_data, lines))
                 except Exception as e:
-                    errors.append(f"{os.path.basename(fp)}: {e}")
-                self.ai_queue.put(("file_done", i, total, total_f, total_a, total_r))
+                    self.ai_queue.put(("error", os.path.basename(fp), str(e)))
         finally:
-            self.ai_queue.put(("done", total_f, total_a, total_r, errors))
+            self.ai_queue.put(("done",))
 
     def _ai_poll(self):
-        """主线程轮询：处理 AI 识别线程发来的消息并更新界面"""
+        """主线程轮询：合并 AI 结果并刷新界面（所有共享数据的修改都发生在这里）"""
         try:
             while True:
                 msg = self.ai_queue.get_nowait()
                 kind = msg[0]
                 if kind == "start":
                     _, i, total, name = msg
+                    self.ai_done_count = i - 1
                     self.ai_status_var.set(f"AI 识别中 {i}/{total}：{name}")
                     self.ai_progress.config(value=i - 1)
-                elif kind == "file_done":
-                    _, i, total, tf, ta, tr = msg
-                    self.ai_progress.config(value=i)
-                    self.ai_status_var.set(f"AI 识别 {i}/{total}（过滤 {tf}，补充 {ta}，推荐 {tr}）")
+                elif kind == "apply":
+                    _, fp, ai_data, lines = msg
+                    params = self.param_map.get(fp)
+                    if params is not None:
+                        f, a, r = apply_ai_result(params, ai_data, lines, fp)
+                        self._ai_total_f += f
+                        self._ai_total_a += a
+                        self._ai_total_r += r
+                    self.ai_done_count += 1
+                    self.ai_progress.config(value=self.ai_done_count)
+                    self.ai_status_var.set(
+                        f"AI 识别 {self.ai_done_count}/{self._ai_total}"
+                        f"（过滤 {self._ai_total_f}，补充 {self._ai_total_a}，推荐 {self._ai_total_r}）")
+                elif kind == "error":
+                    _, name, err = msg
+                    self._ai_errors.append(f"{name}: {err}")
                 elif kind == "done":
-                    _, tf, ta, tr, errors = msg
-                    self._ai_done(tf, ta, tr, errors)
+                    self._ai_done(self._ai_total_f, self._ai_total_a, self._ai_total_r, self._ai_errors)
                     return
         except queue.Empty:
             pass

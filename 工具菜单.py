@@ -1,9 +1,11 @@
+import os
+import sys
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
-import subprocess
-import sys
-import os
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ui_theme
 import env_check
 
 
@@ -11,96 +13,135 @@ class ToolMenuApp:
     def __init__(self, root):
         self.root = root
         self.root_dir = os.path.dirname(os.path.abspath(__file__))
-        self.root.title("工具菜单")
-        self.root.geometry("600x450")
-        self.root.minsize(400, 300)
+        self.root.title("工具箱")
 
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - 600) // 2
-        y = (screen_height - 450) // 2
-        self.root.geometry(f"600x450+{x}+{y}")
+        ui_theme.apply(self.root)
+        ui_theme.center(self.root, 640, 620, min_w=480, min_h=420)
 
-        self.setup_styles()
-        self.create_widgets()
+        self.tools = [
+            {"name": "参数扫描工具", "description": "批量查看、编辑、管理代码参数", "file": "tools/param_scanner_gui.py", "icon": "⚙️"},
+            {"name": "文件批量重命名", "description": "批量重命名文件，支持多种命名规则", "file": "tools/change_name.py", "icon": "🔄"},
+            {"name": "视频抽帧工具", "description": "从视频中提取帧图片", "file": "tools/frame_extract.py", "icon": "🎬", "deps": ["cv2"]},
+            {"name": "图片批量裁剪", "description": "框选一次区域，批量裁剪整个目录的图片", "file": "tools/cut_gui.py", "icon": "✂️", "deps": ["cv2", "PIL"]},
+            {"name": "图片转RGB565", "description": "将图片转换为RGB565的C数组（STM32屏幕显示）", "file": "tools/img2rgb565_gui.py", "icon": "🖼️", "deps": ["PIL"]},
+            {"name": "进度条标定尺", "description": "透明进度条标定工具", "file": "tools/ruler.py", "icon": "📏"},
+            {"name": "模型训练工具", "description": "训练机器学习模型（自动检测YOLO训练环境）", "file": "tools/model_train.py", "icon": "🤖", "deps": ["cv2", "numpy", "PIL"], "env": True},
+        ]
+
+        self._create_widgets()
         self.check_environment()
 
-    def setup_styles(self):
-        style = ttk.Style()
-        style.theme_use('clam')
+    def _create_widgets(self):
+        c = ui_theme.COLORS
 
-        style.configure('Title.TLabel', 
-                       font=('微软雅黑', 18, 'bold'),
-                       foreground='#1a73e8')
+        # 顶部标题区
+        header = tk.Frame(self.root, bg=c["surface"])
+        header.pack(fill=tk.X)
+        header_inner = tk.Frame(header, bg=c["surface"])
+        header_inner.pack(fill=tk.X, padx=22, pady=(18, 16))
+        tk.Label(header_inner, text="🛠️ 工具箱", bg=c["surface"], fg=c["primary"],
+                 font=ui_theme.ui_font(17, True)).pack(anchor="w")
+        tk.Label(header_inner, text="常用开发辅助工具集合，点击卡片即可启动",
+                 bg=c["surface"], fg=c["text_muted"],
+                 font=ui_theme.ui_font(9)).pack(anchor="w", pady=(4, 0))
+        tk.Frame(self.root, bg=c["border"], height=1).pack(fill=tk.X)
 
-        style.configure('Tool.TButton',
-                       font=('微软雅黑', 12),
-                       padding=15,
-                       borderwidth=0)
+        # 工具卡片滚动区
+        body = tk.Frame(self.root, bg=c["bg"])
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(14, 4))
 
-        style.map('Tool.TButton',
-                  background=[('active', '#4285f4'), ('!active', '#1a73e8')],
-                  foreground=[('active', 'white'), ('!active', 'white')])
-
-        style.configure('Description.TLabel',
-                       font=('微软雅黑', 10),
-                       foreground='#666666')
-
-    def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="30")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        title_label = ttk.Label(main_frame, text="🛠️ 工具箱", style='Title.TLabel')
-        title_label.pack(pady=(0, 20))
-
-        self.canvas = tk.Canvas(main_frame, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = ttk.Frame(self.canvas)
+        self.canvas = tk.Canvas(body, highlightthickness=0, bg=c["bg"])
+        self.scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=c["bg"])
 
         self.scrollable_frame.bind(
             "<Configure>",
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         )
 
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self._canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
 
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
-
-        self.tools = [
-            {"name": "参数扫描工具", "description": "批量查看、编辑、管理代码参数", "file": "tools/param_scanner_gui.py", "icon": "⚙️"},
-            {"name": "文件批量重命名", "description": "批量重命名文件，支持多种命名规则", "file": "tools/change_name.py", "icon": "🔄"},
-            {"name": "视频抽帧工具", "description": "从视频中提取帧图片", "file": "tools/frame_extract.py", "icon": "🎬", "deps": ["cv2"]},
-            {"name": "图片转RGB565", "description": "将图片转换为RGB565的C数组（STM32屏幕显示）", "file": "tools/img2rgb565_gui.py", "icon": "🖼️", "deps": ["PIL"]},
-            {"name": "进度条标定尺", "description": "透明进度条标定工具", "file": "tools/ruler.py", "icon": "📏"},
-            {"name": "模型训练工具", "description": "训练机器学习模型（自动检测YOLO训练环境）", "file": "tools/model_train.py", "icon": "🤖", "deps": ["cv2", "numpy", "PIL"], "env": True},
-        ]
+        # 卡片区域宽度跟随滚动区，卡片随窗口拉伸
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._canvas_window, width=e.width))
 
         for tool in self.tools:
-            tool_frame = ttk.Frame(self.scrollable_frame)
-            tool_frame.pack(fill=tk.X, pady=8)
+            self._create_card(self.scrollable_frame, tool)
 
-            btn = ttk.Button(tool_frame,
-                           text=f"{tool['icon']} {tool['name']}",
-                           style='Tool.TButton',
-                           command=lambda t=tool: self.launch_tool(t))
-            btn.pack(fill=tk.X, pady=(0, 5))
+        # 底部提示
+        footer = tk.Frame(self.root, bg=c["bg"])
+        footer.pack(fill=tk.X, padx=22, pady=(0, 12))
+        tk.Label(footer, text="点击卡片启动对应程序 · 启动时自动检查运行依赖",
+                 bg=c["bg"], fg=c["text_muted"],
+                 font=ui_theme.ui_font(9)).pack(anchor="w")
 
-            desc_label = ttk.Label(tool_frame,
-                                  text=tool['description'],
-                                  style='Description.TLabel')
-            desc_label.pack(anchor=tk.W)
+    def _create_card(self, parent, tool):
+        """创建单个工具卡片（悬停高亮，点击启动）"""
+        c = ui_theme.COLORS
 
-        footer_frame = ttk.Frame(main_frame)
-        footer_frame.pack(fill=tk.X, pady=(20, 0))
+        card = tk.Frame(parent, bg=c["surface"], highlightbackground=c["border"],
+                        highlightthickness=1, cursor="hand2")
+        card.pack(fill=tk.X, pady=(0, 10))
 
-        footer_label = ttk.Label(footer_frame,
-                                text="点击工具按钮启动相应程序",
-                                style='Description.TLabel')
-        footer_label.pack()
+        row = tk.Frame(card, bg=c["surface"])
+        row.pack(fill=tk.X, padx=16, pady=13)
+
+        icon = tk.Label(row, text=tool["icon"], bg=c["surface"], font=ui_theme.ui_font(20))
+        icon.pack(side=tk.LEFT, padx=(0, 14))
+
+        text_box = tk.Frame(row, bg=c["surface"])
+        text_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        name = tk.Label(text_box, text=tool["name"], bg=c["surface"], fg=c["text"],
+                        font=ui_theme.ui_font(11, True), anchor="w")
+        name.pack(anchor="w")
+
+        desc = tk.Label(text_box, text=tool["description"], bg=c["surface"],
+                        fg=c["text_muted"], font=ui_theme.ui_font(9), anchor="w")
+        desc.pack(anchor="w", pady=(3, 0))
+
+        arrow = tk.Label(row, text="›", bg=c["surface"], fg=c["text_muted"],
+                         font=ui_theme.ui_font(16, True))
+        arrow.pack(side=tk.RIGHT, padx=(10, 2))
+
+        widgets = [card, row, icon, text_box, name, desc, arrow]
+
+        def set_hover(hover):
+            bg = c["hover"] if hover else c["surface"]
+            for w in widgets:
+                w.configure(bg=bg)
+            card.configure(highlightbackground=c["primary"] if hover else c["border"])
+
+        def on_enter(_event):
+            set_hover(True)
+
+        def on_leave(_event):
+            # 移动到卡片内部子控件时也会触发 Leave，先确认指针是否仍在卡片范围内
+            if not self._pointer_in(card):
+                set_hover(False)
+
+        for w in widgets:
+            w.bind("<Enter>", on_enter)
+            w.bind("<Leave>", on_leave)
+            w.bind("<Button-1>", lambda e, t=tool: self.launch_tool(t))
+            w.bind("<MouseWheel>", self.on_mousewheel)
+
+    def _pointer_in(self, widget):
+        """判断鼠标指针当前是否在指定控件（含子控件）范围内"""
+        try:
+            x, y = widget.winfo_pointerxy()
+            under = widget.winfo_containing(x, y)
+        except Exception:
+            return False
+        while under is not None:
+            if under == widget:
+                return True
+            under = getattr(under, "master", None)
+        return False
 
     def on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")

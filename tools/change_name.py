@@ -1,9 +1,16 @@
 import os
-import re
 import shutil
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ui_theme
+
+
+def _is_ascii_number(text):
+    """严格判断是否可为 int() 解析的纯 ASCII 数字（isdigit() 对 '²' 也返回 True，不能直接用）"""
+    return text.isascii() and text.isdigit()
 
 
 class FileRenamerApp:
@@ -24,7 +31,7 @@ class FileRenamerApp:
         title_frame.pack(fill=tk.X, pady=(0, 10))
 
         title_label = ttk.Label(title_frame, text="🔄 文件批量重命名工具",
-                                font=('微软雅黑', 14, 'bold'), foreground='#2196F3')
+                                font=ui_theme.ui_font(14, True), foreground=ui_theme.COLORS["primary"])
         title_label.pack(side=tk.LEFT)
 
         # 功能选择卡片
@@ -52,7 +59,7 @@ class FileRenamerApp:
         source_frame.pack(fill=tk.X, pady=2)
 
         ttk.Label(source_frame, text="源目录:", width=8).pack(side=tk.LEFT)
-        self.source_path = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\images\val")
+        self.source_path = tk.StringVar(value="")
         ttk.Entry(source_frame, textvariable=self.source_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(source_frame, text="📁", command=self.browse_source, width=3).pack(side=tk.RIGHT)
 
@@ -72,7 +79,7 @@ class FileRenamerApp:
         target_inner.pack(fill=tk.X)
 
         ttk.Label(target_inner, text="目标目录:", width=8).pack(side=tk.LEFT)
-        self.target_path = tk.StringVar(value=r"C:\Users\84820\Desktop\soldier_data\images\val_renamed")
+        self.target_path = tk.StringVar(value="")
         ttk.Entry(target_inner, textvariable=self.target_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(target_inner, text="📁", command=self.browse_target, width=3).pack(side=tk.RIGHT)
 
@@ -112,7 +119,7 @@ class FileRenamerApp:
         ttk.Label(name_frame, text="起始数字:", width=8).pack(side=tk.LEFT)
         self.start_number = tk.StringVar(value="229")
         ttk.Entry(name_frame, textvariable=self.start_number, width=8).pack(side=tk.LEFT)
-        ttk.Label(name_frame, text="(同名文件同数字)", font=('微软雅黑', 8), foreground='gray').pack(side=tk.LEFT,
+        ttk.Label(name_frame, text="(同名文件同数字)", font=ui_theme.ui_font(8), foreground=ui_theme.COLORS["text_muted"]).pack(side=tk.LEFT,
                                                                                                      padx=10)
 
         # 预览卡片
@@ -124,9 +131,8 @@ class FileRenamerApp:
         preview_frame.pack(fill=tk.BOTH, expand=True)
 
         self.preview_text = tk.Text(preview_frame, height=12, width=80,
-                                    font=('Consolas', 9), wrap=tk.WORD,
-                                    relief=tk.FLAT, borderwidth=1,
-                                    bg='#fafafa')
+                                    font=ui_theme.mono_font(9), wrap=tk.WORD)
+        ui_theme.style_text(self.preview_text)
         scrollbar = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview_text.yview)
         self.preview_text.configure(yscrollcommand=scrollbar.set)
 
@@ -143,43 +149,23 @@ class FileRenamerApp:
         ttk.Button(btn_inner, text="👁️ 预览", command=self.preview_changes,
                    width=12).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_inner, text="⚡ 执行", command=self.execute_rename,
-                   width=12).pack(side=tk.LEFT, padx=5)
+                   style="Accent.TButton", width=12).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_inner, text="🧹 清除", command=self.clear_preview,
                    width=12).pack(side=tk.LEFT, padx=5)
 
         # 状态栏
         self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var,
-                               relief=tk.SUNKEN, anchor=tk.W,
-                               font=('微软雅黑', 8))
-        status_bar.pack(fill=tk.X, pady=(5, 0))
+        ui_theme.make_status_bar(main_frame, self.status_var, fill=tk.X, pady=(8, 0))
 
         # 初始状态
         self.target_container.pack_forget()
         self.toggle_function()
 
+        ui_theme.center(self.root, 750, 650, min_w=680, min_h=560)
+
     def setup_styles(self):
-        """设置样式"""
-        style = ttk.Style()
-        style.theme_use('clam')
-
-        # 颜色配置
-        self.colors = {
-            'primary': '#2196F3',
-            'success': '#4CAF50',
-            'warning': '#FF9800',
-            'error': '#F44336',
-            'bg': '#f5f5f5'
-        }
-
-        # 配置样式
-        style.configure('TLabel', font=('微软雅黑', 9))
-        style.configure('TButton', font=('微软雅黑', 9))
-        style.configure('TRadiobutton', font=('微软雅黑', 9))
-        style.configure('TCheckbutton', font=('微软雅黑', 9))
-        style.configure('TEntry', font=('微软雅黑', 9))
-        style.configure('TLabelframe', font=('微软雅黑', 9, 'bold'))
-        style.configure('TLabelframe.Label', font=('微软雅黑', 9, 'bold'))
+        """应用统一主题"""
+        ui_theme.apply(self.root)
 
     def browse_source(self):
         directory = filedialog.askdirectory(initialdir=self.source_path.get())
@@ -253,7 +239,7 @@ class FileRenamerApp:
 
             target_files = []
             for f in files:
-                if f['name'].isdigit():
+                if _is_ascii_number(f['name']):
                     num = int(f['name'])
                     if range_from <= num <= range_to:
                         target_files.append(f)
@@ -282,7 +268,7 @@ class FileRenamerApp:
         try:
             start_num = int(self.start_number.get())
 
-            non_digit_files = [f for f in files if not f['name'].isdigit()]
+            non_digit_files = [f for f in files if not _is_ascii_number(f['name'])]
 
             name_groups = {}
             for f in non_digit_files:
@@ -306,6 +292,39 @@ class FileRenamerApp:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的起始数字！")
 
+    def collect_target_names(self, files):
+        """按当前参数算出本批次将产生的目标文件名（只读计算，不修改任何文件），参数非法时返回 None"""
+        target_names = []
+        if self.function_var.get() == "number_modify":
+            try:
+                range_from = int(self.range_from.get())
+                range_to = int(self.range_to.get())
+                modify_value = int(self.modify_value.get())
+            except ValueError:
+                return None
+            operation = self.operation_var.get()
+            for f in files:
+                if _is_ascii_number(f['name']):
+                    num = int(f['name'])
+                    if range_from <= num <= range_to:
+                        new_num = num + modify_value if operation == "+" else num - modify_value
+                        target_names.append(f"{new_num}{f['ext']}")
+        else:
+            try:
+                start_num = int(self.start_number.get())
+            except ValueError:
+                return None
+            name_groups = {}
+            for f in files:
+                if not _is_ascii_number(f['name']):
+                    name_groups.setdefault(f['name'], []).append(f)
+            current_num = start_num
+            for base_name, group in name_groups.items():
+                for f in group:
+                    target_names.append(f"{current_num}{f['ext']}")
+                current_num += 1
+        return target_names
+
     def execute_rename(self):
         if not messagebox.askyesno("确认", "确定要执行重命名操作吗？此操作不可逆！"):
             return
@@ -319,6 +338,30 @@ class FileRenamerApp:
         else:
             target_dir = self.target_path.get()
             os.makedirs(target_dir, exist_ok=True)
+
+        # 冲突检查：复制模式（shutil.copy2）会静默覆盖目标目录中的同名文件，执行前先确认
+        if not self.save_in_place.get():
+            target_names = self.collect_target_names(files)
+            if target_names is None:
+                return
+            conflicts = []
+            if os.path.isdir(target_dir):
+                for name in target_names:
+                    if os.path.exists(os.path.join(target_dir, name)):
+                        conflicts.append(name)
+            seen = set()
+            for name in target_names:
+                if name in seen and name not in conflicts:
+                    conflicts.append(name)
+                seen.add(name)
+            if conflicts:
+                preview = "\n".join(conflicts[:10])
+                more = f"\n... 等共 {len(conflicts)} 个" if len(conflicts) > 10 else ""
+                if not messagebox.askyesno(
+                        "目标文件已存在",
+                        f"以下 {len(conflicts)} 个目标文件已存在，继续将覆盖它们：\n\n{preview}{more}\n\n是否继续？"):
+                    self.status_var.set("已取消：存在同名目标文件")
+                    return
 
         success_count = 0
         error_count = 0
@@ -342,7 +385,7 @@ class FileRenamerApp:
 
             target_files = []
             for f in files:
-                if f['name'].isdigit():
+                if _is_ascii_number(f['name']):
                     num = int(f['name'])
                     if range_from <= num <= range_to:
                         target_files.append(f)
@@ -383,7 +426,7 @@ class FileRenamerApp:
         try:
             start_num = int(self.start_number.get())
 
-            non_digit_files = [f for f in files if not f['name'].isdigit()]
+            non_digit_files = [f for f in files if not _is_ascii_number(f['name'])]
 
             name_groups = {}
             for f in non_digit_files:

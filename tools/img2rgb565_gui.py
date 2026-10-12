@@ -1,8 +1,12 @@
 import os
 import re
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ui_theme
 
 from PIL import Image, ImageTk
 
@@ -10,11 +14,15 @@ from PIL import Image, ImageTk
 class ImageToRGB565GUI:
     """将图片转换为 RGB565 的 C 数组头文件，用于 ST7735/ST7789 等屏幕显示。"""
 
+    # 目标尺寸上限：单边不超过 4096，且总像素不超过 400 万
+    MAX_DIMENSION = 4096
+    MAX_PIXELS = 4000000
+
     def __init__(self, root):
         self.root = root
         self.root.title("图片转 RGB565 工具")
-        self.root.geometry("900x780")
-        self.root.minsize(820, 680)
+        self.root.geometry("900x840")
+        self.root.minsize(820, 740)
         self.root.resizable(True, True)
 
         # 参数变量
@@ -32,54 +40,52 @@ class ImageToRGB565GUI:
         self._setup_style()
         self._create_widgets()
 
+        ui_theme.center(self.root, 900, 840, min_w=820, min_h=740)
+
     # ==================== 界面 ====================
     def _setup_style(self):
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure(".", font=("微软雅黑", 10))
-        style.configure("TLabelframe.Label", font=("微软雅黑", 10, "bold"))
-        style.configure("Accent.TButton", font=("微软雅黑", 11, "bold"))
-        style.configure("Tip.TLabel", font=("微软雅黑", 9), foreground="gray")
+        ui_theme.apply(self.root)
 
     def _create_widgets(self):
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(4, weight=1)
 
         # 标题
-        title_frame = ttk.Frame(self.root, padding=(20, 15, 20, 5))
+        title_frame = ttk.Frame(self.root, padding=(20, 12, 20, 4))
         title_frame.grid(row=0, column=0, sticky="ew")
         ttk.Label(title_frame, text="图片转 RGB565 工具",
-                  font=("微软雅黑", 18, "bold")).pack(anchor="w")
+                  font=ui_theme.ui_font(18, True),
+                  foreground=ui_theme.COLORS["primary"]).pack(anchor="w")
         ttk.Label(title_frame,
                   text="将图片转换为 RGB565 格式的 C 数组头文件，适配 ST7735/ST7789 屏幕（高字节在前）",
                   style="Tip.TLabel").pack(anchor="w", pady=(4, 0))
 
         # 文件选择
-        frame_file = ttk.LabelFrame(self.root, text="文件选择", padding=(15, 12))
-        frame_file.grid(row=1, column=0, sticky="ew", padx=20, pady=8)
+        frame_file = ttk.LabelFrame(self.root, text="文件选择", padding=(15, 8))
+        frame_file.grid(row=1, column=0, sticky="ew", padx=20, pady=6)
         frame_file.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(frame_file, text="源图片：").grid(row=0, column=0, padx=5, pady=6, sticky="w")
-        ttk.Entry(frame_file, textvariable=self.image_path).grid(row=0, column=1, padx=5, pady=6, sticky="ew")
+        ttk.Label(frame_file, text="源图片：").grid(row=0, column=0, padx=5, pady=4, sticky="w")
+        ttk.Entry(frame_file, textvariable=self.image_path).grid(row=0, column=1, padx=5, pady=4, sticky="ew")
         ttk.Button(frame_file, text="浏览", width=10,
-                   command=self._select_image).grid(row=0, column=2, padx=5, pady=6)
+                   command=self._select_image).grid(row=0, column=2, padx=5, pady=4)
 
-        ttk.Label(frame_file, text="输出头文件：").grid(row=1, column=0, padx=5, pady=6, sticky="w")
-        ttk.Entry(frame_file, textvariable=self.output_path).grid(row=1, column=1, padx=5, pady=6, sticky="ew")
+        ttk.Label(frame_file, text="输出头文件：").grid(row=1, column=0, padx=5, pady=4, sticky="w")
+        ttk.Entry(frame_file, textvariable=self.output_path).grid(row=1, column=1, padx=5, pady=4, sticky="ew")
         ttk.Button(frame_file, text="浏览", width=10,
-                   command=self._select_output).grid(row=1, column=2, padx=5, pady=6)
+                   command=self._select_output).grid(row=1, column=2, padx=5, pady=4)
 
         # 参数设置
-        frame_param = ttk.LabelFrame(self.root, text="转换参数", padding=(15, 12))
-        frame_param.grid(row=2, column=0, sticky="ew", padx=20, pady=8)
+        frame_param = ttk.LabelFrame(self.root, text="转换参数", padding=(15, 8))
+        frame_param.grid(row=2, column=0, sticky="ew", padx=20, pady=6)
         frame_param.grid_columnconfigure(3, weight=1)
 
-        ttk.Label(frame_param, text="目标宽度：").grid(row=0, column=0, padx=5, pady=6, sticky="w")
-        ttk.Entry(frame_param, textvariable=self.target_w, width=8).grid(row=0, column=1, padx=5, pady=6, sticky="w")
-        ttk.Label(frame_param, text="目标高度：").grid(row=0, column=2, padx=(15, 5), pady=6, sticky="w")
-        ttk.Entry(frame_param, textvariable=self.target_h, width=8).grid(row=0, column=3, padx=5, pady=6, sticky="w")
+        ttk.Label(frame_param, text="目标宽度：").grid(row=0, column=0, padx=5, pady=4, sticky="w")
+        ttk.Entry(frame_param, textvariable=self.target_w, width=8).grid(row=0, column=1, padx=5, pady=4, sticky="w")
+        ttk.Label(frame_param, text="目标高度：").grid(row=0, column=2, padx=(15, 5), pady=4, sticky="w")
+        ttk.Entry(frame_param, textvariable=self.target_h, width=8).grid(row=0, column=3, padx=5, pady=4, sticky="w")
 
-        ttk.Label(frame_param, text="缩放方式：").grid(row=1, column=0, padx=5, pady=6, sticky="w")
+        ttk.Label(frame_param, text="缩放方式：").grid(row=1, column=0, padx=5, pady=4, sticky="w")
         mode_frame = ttk.Frame(frame_param)
         mode_frame.grid(row=1, column=1, columnspan=3, sticky="w", padx=5)
         ttk.Radiobutton(mode_frame, text="等比缩放 + 黑边居中",
@@ -87,18 +93,20 @@ class ImageToRGB565GUI:
         ttk.Radiobutton(mode_frame, text="拉伸填充",
                         variable=self.fit_mode, value="stretch").pack(side=tk.LEFT)
 
-        ttk.Label(frame_param, text="数组变量名：").grid(row=2, column=0, padx=5, pady=6, sticky="w")
-        ttk.Entry(frame_param, textvariable=self.array_name, width=20).grid(row=2, column=1, padx=5, pady=6, sticky="w")
-        ttk.Label(frame_param, text="每行条目数：").grid(row=2, column=2, padx=(15, 5), pady=6, sticky="w")
-        ttk.Entry(frame_param, textvariable=self.bytes_per_row, width=8).grid(row=2, column=3, padx=5, pady=6, sticky="w")
+        ttk.Label(frame_param, text="数组变量名：").grid(row=2, column=0, padx=5, pady=4, sticky="w")
+        ttk.Entry(frame_param, textvariable=self.array_name, width=20).grid(row=2, column=1, padx=5, pady=4, sticky="w")
+        ttk.Label(frame_param, text="每行条目数：").grid(row=2, column=2, padx=(15, 5), pady=4, sticky="w")
+        ttk.Entry(frame_param, textvariable=self.bytes_per_row, width=8).grid(row=2, column=3, padx=5, pady=4, sticky="w")
 
         # 预览
-        frame_preview = ttk.LabelFrame(self.root, text="预览", padding=(15, 12))
-        frame_preview.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
+        frame_preview = ttk.LabelFrame(self.root, text="预览", padding=(15, 8))
+        frame_preview.grid(row=3, column=0, sticky="ew", padx=20, pady=6)
         frame_preview.grid_columnconfigure(1, weight=1)
 
         self.preview_label = tk.Label(frame_preview, text="选择图片后显示预览",
-                                      width=40, height=16, bg="#f0f0f0", fg="#888888")
+                                      width=40, height=8,
+                                      bg=ui_theme.COLORS["bg"], fg=ui_theme.COLORS["text_muted"],
+                                      highlightthickness=1, highlightbackground=ui_theme.COLORS["border"])
         self.preview_label.grid(row=0, column=0, padx=5, pady=5, rowspan=4, sticky="n")
 
         self.info_label = ttk.Label(frame_preview, text="", justify="left",
@@ -106,13 +114,14 @@ class ImageToRGB565GUI:
         self.info_label.grid(row=0, column=1, padx=10, pady=5, sticky="nw")
 
         # 日志
-        frame_log = ttk.LabelFrame(self.root, text="运行日志", padding=(15, 12))
-        frame_log.grid(row=4, column=0, sticky="nsew", padx=20, pady=8)
+        frame_log = ttk.LabelFrame(self.root, text="运行日志", padding=(15, 8))
+        frame_log.grid(row=4, column=0, sticky="nsew", padx=20, pady=6)
         frame_log.grid_columnconfigure(0, weight=1)
         frame_log.grid_rowconfigure(0, weight=1)
 
         self.log_text = tk.Text(frame_log, height=8, wrap="word",
-                                font=("Consolas", 10), padx=8, pady=8)
+                                font=ui_theme.mono_font(10))
+        ui_theme.style_text(self.log_text)
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame_log, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -137,8 +146,6 @@ class ImageToRGB565GUI:
     def _set_busy(self, busy):
         self.is_converting = busy
         state = "disabled" if busy else "normal"
-        for child in self.root.winfo_children():
-            pass
         self.btn_convert.config(state=state)
 
     # ==================== 交互 ====================
@@ -216,6 +223,15 @@ class ImageToRGB565GUI:
             raise ValueError("目标宽/高必须是整数！")
         if width <= 0 or height <= 0:
             raise ValueError("目标宽/高必须大于 0！")
+        # 上限防护：尺寸过大时中间字符串数量会爆炸（内存/耗时），这里提前拦截
+        if width > self.MAX_DIMENSION or height > self.MAX_DIMENSION:
+            raise ValueError(
+                f"目标宽/高不能超过 {self.MAX_DIMENSION}（当前 {width} x {height}）！"
+            )
+        if width * height > self.MAX_PIXELS:
+            raise ValueError(
+                f"目标像素总数不能超过 {self.MAX_PIXELS}（当前 {width * height}），请减小尺寸！"
+            )
 
         array_name = self.array_name.get().strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", array_name):
@@ -260,11 +276,22 @@ class ImageToRGB565GUI:
             img, count = self._convert_to_rgb565(**params)
             self.root.after(0, lambda: self._on_success(params, img, count))
         except Exception as e:
-            self.root.after(0, lambda: self._on_error(e))
+            # 注意：except 块结束时会自动 del e，必须先用默认参数把异常对象绑定进闭包
+            self.root.after(0, lambda err=e: self._on_error(err))
+
+    @staticmethod
+    def _quantize_preview(pil_img):
+        """按 RGB565 的位宽截断再还原成 RGB，用于预览真实的量化效果（色带）。"""
+        lut = (
+            [(i >> 3) << 3 for i in range(256)] +   # R: 5 bit
+            [(i >> 2) << 2 for i in range(256)] +   # G: 6 bit
+            [(i >> 3) << 3 for i in range(256)]     # B: 5 bit
+        )
+        return pil_img.point(lut)
 
     def _on_success(self, params, img, count):
         self._set_busy(False)
-        self._show_preview(img)
+        self._show_preview(self._quantize_preview(img))
         out_path = params["output_path"]
         try:
             size_kb = os.path.getsize(out_path) / 1024.0
@@ -289,13 +316,19 @@ class ImageToRGB565GUI:
         messagebox.showerror("错误", str(error))
 
     @staticmethod
-    def _make_guard(output_path):
+    def _make_base(output_path):
+        """由输出文件名派生一个合法的 C 标识符前缀（大写）。"""
         base = os.path.splitext(os.path.basename(output_path))[0]
         base = re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").upper()
         if not base:
             base = "IMAGE"
         if base[0].isdigit():
             base = "IMAGE_" + base
+        return base
+
+    @staticmethod
+    def _make_guard(output_path):
+        base = ImageToRGB565GUI._make_base(output_path)
         return f"__{base}_H__"
 
     @staticmethod
@@ -325,6 +358,9 @@ class ImageToRGB565GUI:
         lines = [",".join(items[i:i + per_row]) for i in range(0, len(items), per_row)]
 
         guard = ImageToRGB565GUI._make_guard(output_path)
+        # 宏名基于输出文件名派生，避免同一 .c 文件 include 多个不同尺寸的头文件时
+        # IMG_W / IMG_H 发生宏重定义
+        base = ImageToRGB565GUI._make_base(output_path)
         out_dir = os.path.dirname(os.path.abspath(output_path))
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
@@ -333,7 +369,8 @@ class ImageToRGB565GUI:
             f.write("/* Auto-generated from %s, %dx%d RGB565 */\n"
                     % (os.path.basename(image_path), width, height))
             f.write(f"#ifndef {guard}\n#define {guard}\n\n")
-            f.write(f"#define IMG_W {width}\n#define IMG_H {height}\n\n")
+            f.write("#include <stdint.h>\n\n")
+            f.write(f"#define {base}_W {width}\n#define {base}_H {height}\n\n")
             f.write(f"static const uint8_t {array_name}[] = {{\n")
             for ln in lines:
                 f.write("    " + ln + ",\n")
