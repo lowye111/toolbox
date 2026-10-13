@@ -54,6 +54,13 @@ python tools/install_hooks.py
 
 （git 不会自动分发钩子，所以换机器要重新装。）
 
+## 关于中文路径
+
+Windows 下 `cv2.imread` / `cv2.imwrite` **不支持中文（非 ASCII）路径**：
+前者静默返回 `None`，后者静默返回 `False`，很容易被误判成"处理失败"。
+因此本项目统一通过根目录的 `img_io.py` 读写图片（内部走 `imdecode` / `imencode`），
+数据集目录、视频路径、输出目录含中文都能正常工作。
+
 ## 工具列表
 
 ### 1️⃣ 参数扫描工具 (param_scanner_gui.py)
@@ -122,6 +129,9 @@ python tools/install_hooks.py
   - 自动查找 yolov5 仓库目录（可在 config.json 的 yolov5_dir 指定）
   - 支持 YOLOv5 / YOLOv8 / YOLO11 系列模型（v5 需 yolov5 仓库，v8/v11 需 ultralytics）
   - 训练页的「Python路径」即为实际执行训练的解释器（留空则用 PATH 中的 python）
+  - 生成 data.yaml 时**按标签文件自动推断类别数**（取标签里最大类别 id + 1），
+    不再写死 `nc`，避免换数据集后按错误类别静默训练
+  - 训练/测试/导出/一键四处的输出读取统一走一个后台流程，训练期间界面不再冻结
 
 ## 注意事项
 
@@ -129,3 +139,6 @@ python tools/install_hooks.py
 - 点击「保存」才会真正写入文件；保存前会在同目录留一份 `.bak` 备份，并按原文件编码与行尾写回
 - 参数扫描工具里被 `×` 隐藏的参数可通过顶部「显示隐藏项」找回
 - 关闭工具菜单不会影响已启动的工具窗口
+- 图片路径含中文时请勿改用 `cv2.imread/imwrite`，一律使用 `img_io`（见上）
+- data.yaml 的 `nc` 会自动推断，但类别名仍是占位（rssn/wskg/…），
+  换数据集时请按实际类别名修改 `names`（个数需与 `nc` 一致）

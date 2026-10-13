@@ -25,6 +25,7 @@ except Exception:
         return None
 
 import ui_theme
+import img_io   # 图片读写（兼容中文路径，cv2.imread/imwrite 不支持非 ASCII 路径）
 
 # Windows 平台用于隐藏子进程控制台窗口；非 Windows 平台无此常量，给出兼容默认值
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -41,6 +42,108 @@ def decode_output_line(raw):
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+# data.yaml 里的类别名（仅作占位；实际类别数以标签文件推断结果为准）。
+# 之前这里把 nc 和类别名都写死在代码里（nc: 13 + 13 个固定名称），
+# 换数据集时不会报错，但会按错误的类别训练——属于静默错误，故改为自动推断。
+DEFAULT_CLASS_NAMES = [
+    "rssn", "wskg", "bpsg", "gskg", "rskng", "gssn", "wssg",
+    "bssn", "wssn", "gssg", "rssgg", "rssg", "bssg",
+]
+
+
+def infer_class_count(labels_dir):
+    """扫描标签目录，按 .txt 第一列的最大类别 id + 1 推断类别数。
+
+    返回 (类别数, 扫描到的标签文件数)；无法推断时类别数为 0。
+    标签格式为 YOLO 标准：每行 "class_id cx cy w h"。
+    """
+    max_id = -1
+    scanned = 0
+    if not labels_dir or not os.path.isdir(labels_dir):
+        return 0, 0
+    for name in os.listdir(labels_dir):
+        if not name.lower().endswith(".txt"):
+            continue
+        scanned += 1
+        path = os.path.join(labels_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    try:
+                        cid = int(float(parts[0]))
+                    except ValueError:
+                        continue
+                    if cid > max_id:
+                        max_id = cid
+        except Exception:
+            continue
+    return (max_id + 1 if max_id >= 0 else 0), scanned
+
+
+def build_names_block(names):
+    """把类别名列表渲染成 data.yaml 的 names 段落"""
+    return "\n".join("  - %s" % n for n in names)
+
+
+# 清理子进程输出里的 ANSI 转义序列（训练进度条会输出大量控制字符）
+_ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+# 训练进度解析
+_EPOCH_RE = re.compile(r'Epoch\s+(\d+)/(\d+)')
+_LOSS_RE = re.compile(r'loss\s*[=:]\s*([\d.]+)')
+
+
+def stream_process(cmd, app, on_line, on_finish, on_error=None,
+                   cwd=None, register=None):
+    """在后台线程里运行子进程并把输出逐行回调给界面。
+
+    原先训练/测试/导出/一键四处各写了一份几乎相同的
+    Popen + 逐行解码 + 清 ANSI + root.after 代码，这里统一实现，
+    避免四处各改一遍（此前就出现过只有一处补了编码处理的情况）。
+
+    - app             : 拥有 .root 的 GUI 对象（回调都经 root.after 回主线程）
+    - on_line(text)   : 收到一行干净输出（空行不回调）
+    - on_finish(ok)   : 进程结束（ok 表示 returncode == 0）
+    - on_error(text)  : 异常信息回调，用于显示到界面
+    - cwd             : 子进程工作目录
+    - register        : 回调，接收 Popen 对象（供"停止"按钮 terminate 用）
+    """
+    def worker():
+        try:
+            kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=False, bufsize=1,
+                          creationflags=_NO_WINDOW, shell=False)
+            if cwd:
+                kwargs["cwd"] = cwd
+            process = subprocess.Popen(cmd, **kwargs)
+            if register is not None:
+                register(process)
+
+            for line in process.stdout:
+                try:
+                    text = _ANSI_ESCAPE.sub('', decode_output_line(line))
+                except Exception:
+                    continue
+                if text.strip():
+                    app.root.after(0, on_line, text)
+
+            process.wait()
+            app.root.after(0, on_finish, process.returncode == 0)
+
+        except Exception as e:
+            if on_error is not None:
+                app.root.after(0, on_error, str(e))
+            app.root.after(0, on_finish, False)
+
+    thread = threading.Thread(target=worker)
+    thread.daemon = True
+    thread.start()
+    return thread
 
 
 class YOLODataPrepApp:
@@ -345,16 +448,17 @@ class YOLODataPrepApp:
     def process_single_image(self, img_path, label_path, out_images_dir, out_labels_dir, target_size):
         """处理单张图片"""
         try:
-            img = cv2.imread(img_path)
+            img = img_io.imread(img_path)
             if img is None:
                 return False
 
             h, w = img.shape[:2]
             img_resized = cv2.resize(img, (target_size, target_size))
             
-            # 保存图片
+            # 保存图片（img_io 兼容中文路径）
             out_img_path = os.path.join(out_images_dir, Path(img_path).name)
-            cv2.imwrite(out_img_path, img_resized)
+            if not img_io.imwrite(out_img_path, img_resized):
+                return False
 
             # 处理标签
             if label_path and os.path.exists(label_path):
@@ -411,39 +515,21 @@ class YOLODataPrepApp:
 
         self.append_oneclick_output(f"  命令: {' '.join(cmd)}")
 
-        try:
-            import re
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        # 走统一的流程：在后台线程里读取输出并回传主线程。
+        # 之前这里是直接在主线程里 for line in process.stdout，
+        # 导致训练期间界面完全冻结（"停止"按钮也点不动）。
+        stream_process(
+            cmd, self,
+            on_line=self.append_oneclick_output,
+            on_finish=self._on_oneclick_finish,
+            on_error=lambda msg: self.append_oneclick_output(f"\n❌ 训练错误: {msg}"),
+            register=lambda p: setattr(self, "oneclick_process", p),
+        )
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=False,
-                bufsize=1,
-                creationflags=_NO_WINDOW
-            )
-            self.oneclick_process = process
-
-            for line in process.stdout:
-                decoded_line = decode_output_line(line)
-                
-                clean_line = ansi_escape.sub('', decoded_line)
-                if clean_line.strip():
-                    self.root.after(0, lambda l=clean_line: self.append_oneclick_output(l))
-
-            process.wait()
-
-            if process.returncode == 0:
-                self.append_oneclick_output("\n✅ 训练完成！")
-                self.root.after(0, lambda: self.oneclick_finished(True))
-            else:
-                self.append_oneclick_output("\n❌ 训练失败")
-                self.root.after(0, lambda: self.oneclick_finished(False))
-
-        except Exception as e:
-            self.append_oneclick_output(f"\n❌ 训练错误: {e}")
-            self.root.after(0, lambda: self.oneclick_finished(False))
+    def _on_oneclick_finish(self, ok):
+        """一键训练结束（已经回到主线程）"""
+        self.append_oneclick_output("\n✅ 训练完成！" if ok else "\n❌ 训练失败")
+        self.oneclick_finished(ok)
 
     def append_oneclick_output(self, text):
         """添加一键处理输出"""
@@ -630,7 +716,7 @@ class YOLODataPrepApp:
         # 预览训练集前3张
         for i, img_path in enumerate(train_images[:3]):
             try:
-                img = cv2.imread(str(img_path))
+                img = img_io.imread(img_path)
                 if img is not None:
                     h, w = img.shape[:2]
                     self.prep_preview.insert(tk.END, f"  ├─ {img_path.name}: {w}x{h}\n")
@@ -678,8 +764,8 @@ class YOLODataPrepApp:
 
         for img_path in images:
             try:
-                # 读取图片
-                img = cv2.imread(str(img_path))
+                # 读取图片（img_io 兼容中文路径）
+                img = img_io.imread(img_path)
                 if img is None:
                     failed += 1
                     continue
@@ -703,9 +789,11 @@ class YOLODataPrepApp:
 
                 canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
 
-                # 保存图片
+                # 保存图片（img_io 兼容中文路径）
                 output_img_path = os.path.join(output_images_dir, img_path.name)
-                cv2.imwrite(output_img_path, canvas)
+                if not img_io.imwrite(output_img_path, canvas):
+                    failed += 1
+                    continue
 
                 # 处理标签
                 label_path = Path(labels_dir) / (img_path.stem + '.txt')
@@ -869,12 +957,27 @@ class YOLODataPrepApp:
             messagebox.showerror("错误", f"处理过程中出错: {e}")
 
     def generate_data_yaml(self, output_base):
-        """生成data.yaml文件"""
+        """生成data.yaml文件（类别数按标签文件自动推断，避免换数据集时静默错标）"""
         # 判断验证集设置
         if self.prep_convert_val.get():
             val_setting = 'val'  # 使用独立的验证集
         else:
             val_setting = 'train'  # 使用训练集作为验证集
+
+        # 从标签目录推断类别数（优先训练集，其次验证集）
+        nc, scanned = infer_class_count(os.path.join(output_base, "labels", "train"))
+        if nc == 0:
+            nc, scanned = infer_class_count(os.path.join(output_base, "labels", "val"))
+        source_note = ""
+        if nc > 0:
+            source_note = "# 类别数量（由 %d 个标签文件自动推断）" % scanned
+        else:
+            # 推断不出来时退回默认值，但要显式告知，避免用户以为是自动的
+            nc = len(DEFAULT_CLASS_NAMES)
+            source_note = ("# 类别数量（未能从标签推断，使用默认值 %d，请按需修改！）" % nc)
+
+        names = DEFAULT_CLASS_NAMES[:nc] if nc <= len(DEFAULT_CLASS_NAMES) else \
+            DEFAULT_CLASS_NAMES + ["class_%d" % i for i in range(len(DEFAULT_CLASS_NAMES), nc)]
 
         yaml_content = f"""# 数据集根目录（使用绝对路径）
 path: {output_base}/images
@@ -883,30 +986,19 @@ path: {output_base}/images
 train: train    # 训练集目录
 val: {val_setting}      # 验证集目录
 
-# 类别数量
-nc: 13
+{source_note}
+nc: {nc}
 
 # 类别名称（注意顺序）
 names:
-  - rssn
-  - wskg
-  - bpsg
-  - gskg
-  - rskng
-  - gssn
-  - wssg
-  - bssn
-  - wssn
-  - gssg
-  - rssgg
-  - rssg
-  - bssg
+{build_names_block(names)}
 """
         yaml_path = os.path.join(output_base, 'data.yaml')
         with open(yaml_path, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
 
         self.prep_preview.insert(tk.END, f"\n📄 已生成 data.yaml: {yaml_path}\n")
+        self.prep_preview.insert(tk.END, f"   类别数: {nc}（{source_note.lstrip('# ')}）\n")
 
     def preprocess_and_train(self):
         """预处理后直接训练"""
@@ -973,29 +1065,20 @@ path: {}/images
 train: train    # 存放图片的文件夹
 val: train      # 验证集目录
 
-# 类别数量
-nc: 13
+# 类别数量（请按你的数据集实际类别数修改，改错不会报错但会训错）
+nc: {nc}
 
-# 类别名称（注意顺序）
+# 类别名称（注意顺序，个数需与 nc 一致）
 names:
-  - rssn
-  - wskg
-  - bpsg
-  - gskg
-  - rskng
-  - gssn
-  - wssg
-  - bssn
-  - wssn
-  - gssg
-  - rssgg
-  - rssg
-  - bssg"""
+{names}"""
 
         self.yaml_text = ScrolledText(yaml_frame, height=15, font=ui_theme.mono_font(10))
         self.yaml_text.pack(fill=tk.BOTH, expand=True)
         ui_theme.style_text(self.yaml_text)
-        self.yaml_text.insert('1.0', yaml_template.format(self.dataset_path.get()))
+        self.yaml_text.insert('1.0', yaml_template.format(
+            self.dataset_path.get(),
+            nc=len(DEFAULT_CLASS_NAMES),
+            names=build_names_block(DEFAULT_CLASS_NAMES)))
 
         # 让文本可选
         self.yaml_text.configure(wrap=tk.NONE)
@@ -1051,12 +1134,21 @@ names:
         labels_dir = os.path.join(self.dataset_path.get(), 'labels', 'train')
         if os.path.exists(labels_dir):
             cache_files = list(Path(labels_dir).glob('*.cache'))
+            removed = 0
+            failed = []
             for f in cache_files:
                 try:
                     os.remove(f)
-                except:
-                    pass
-            messagebox.showinfo("成功", f"已清除 {len(cache_files)} 个缓存文件")
+                    removed += 1
+                except OSError as e:
+                    failed.append(f"{f.name}: {e}")
+            if failed:
+                messagebox.showwarning(
+                    "部分失败",
+                    f"已清除 {removed}/{len(cache_files)} 个缓存文件\n\n"
+                    + "\n".join(failed[:5]))
+            else:
+                messagebox.showinfo("成功", f"已清除 {removed} 个缓存文件")
         else:
             messagebox.showwarning("警告", "labels/train 目录不存在")
 
@@ -1335,65 +1427,27 @@ names:
 
         self.train_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        stream_process(
+            cmd, self,
+            on_line=self._on_train_line,
+            on_finish=self.training_finished,
+            on_error=lambda msg: self.append_train_output(f"错误: {msg}\n"),
+            register=lambda p: setattr(self, "train_process", p),
+        )
 
-        def run_training():
+    def _on_train_line(self, text):
+        """训练输出的一行：显示到日志，并解析轮次/loss 进度"""
+        self.append_train_output(text)
+        m = _EPOCH_RE.search(text)
+        if m:
             try:
-                import re
-                # ANSI转义序列的正则表达式
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=False,
-                    bufsize=1,
-                    creationflags=_NO_WINDOW
-                )
-                self.train_process = process
-
-                # 正则表达式匹配训练进度
-                epoch_pattern = re.compile(r'Epoch\s+(\d+)/(\d+)')
-                loss_pattern = re.compile(r'loss\s*[=:]\s*([\d.]+)')
-                total_epochs = int(self.epochs.get())
-
-                for line in process.stdout:
-                    try:
-                        decoded_line = decode_output_line(line)
-
-                        clean_line = ansi_escape.sub('', decoded_line)
-
-                        if clean_line.strip():
-                            self.root.after(0, self.append_train_output, clean_line)
-
-                            epoch_match = epoch_pattern.search(clean_line)
-                            if epoch_match:
-                                current_epoch = int(epoch_match.group(1))
-                                self.root.after(0, self.update_epoch_info,
-                                                f"当前训练: {current_epoch}/{total_epochs} 轮次")
-
-                            loss_match = loss_pattern.search(clean_line)
-                            if loss_match:
-                                loss_val = loss_match.group(1)
-                                self.root.after(0, self.loss_info.set, f"loss: {loss_val}")
-
-                    except Exception as e:
-                        pass  # 忽略解析错误
-
-                process.wait()
-
-                if process.returncode == 0:
-                    self.root.after(0, self.training_finished, True)
-                else:
-                    self.root.after(0, self.training_finished, False)
-
-            except Exception as e:
-                self.root.after(0, self.append_train_output, f"错误: {e}\n")
-                self.root.after(0, self.training_finished, False)
-
-        thread = threading.Thread(target=run_training)
-        thread.daemon = True
-        thread.start()
+                total = int(self.epochs.get())
+            except (TypeError, ValueError):
+                total = 0
+            self.update_epoch_info(f"当前训练: {int(m.group(1))}/{total} 轮次")
+        m = _LOSS_RE.search(text)
+        if m:
+            self.loss_info.set(f"loss: {m.group(1)}")
 
     def update_epoch_info(self, info):
         """更新训练轮次信息"""
@@ -1681,51 +1735,14 @@ names:
         self.test_btn.config(state=tk.DISABLED)
         self.test_stop_btn.config(state=tk.NORMAL)
 
-        def run_test():
-            try:
-                import re
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-                # 命令为直接调用可执行文件（python / yolo），使用列表形式避免 shell 解析路径
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=False,
-                    bufsize=1,
-                    creationflags=_NO_WINDOW,
-                    shell=False,
-                    cwd=os.getcwd()
-                )
-                self.test_process = process
-
-                for line in process.stdout:
-                    try:
-                        # 解码输出行（自动兼容 utf-8 / gbk）
-                        decoded_line = decode_output_line(line)
-
-                        # 移除ANSI转义序列
-                        clean_line = ansi_escape.sub('', decoded_line)
-
-                        if clean_line.strip():
-                            self.root.after(0, self.append_test_output, clean_line)
-                    except:
-                        pass
-
-                process.wait()
-
-                if process.returncode == 0:
-                    self.root.after(0, self.test_finished, True)
-                else:
-                    self.root.after(0, self.test_finished, False)
-
-            except Exception as e:
-                self.root.after(0, self.append_test_output, f"错误: {e}\n")
-                self.root.after(0, self.test_finished, False)
-
-        thread = threading.Thread(target=run_test)
-        thread.daemon = True
-        thread.start()
+        stream_process(
+            cmd, self,
+            on_line=self.append_test_output,
+            on_finish=self.test_finished,
+            on_error=lambda msg: self.append_test_output(f"错误: {msg}\n"),
+            cwd=os.getcwd(),
+            register=lambda p: setattr(self, "test_process", p),
+        )
 
     def append_test_output(self, text):
         """添加测试输出"""
@@ -1945,44 +1962,12 @@ names:
         self.export_output.insert('1.0', header)
 
         self.export_btn.config(state=tk.DISABLED)
-
-        def run_export():
-            try:
-                import re
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=False,
-                    bufsize=1,
-                    creationflags=_NO_WINDOW
-                )
-
-                for line in process.stdout:
-                    try:
-                        decoded_line = decode_output_line(line)
-                        clean_line = ansi_escape.sub('', decoded_line)
-                        if clean_line.strip():
-                            self.root.after(0, self.append_export_output, clean_line)
-                    except:
-                        pass
-
-                process.wait()
-
-                if process.returncode == 0:
-                    self.root.after(0, self.export_finished, True)
-                else:
-                    self.root.after(0, self.export_finished, False)
-
-            except Exception as e:
-                self.root.after(0, self.append_export_output, f"错误: {e}\n")
-                self.root.after(0, self.export_finished, False)
-
-        thread = threading.Thread(target=run_export)
-        thread.daemon = True
-        thread.start()
+        stream_process(
+            cmd, self,
+            on_line=self.append_export_output,
+            on_finish=self.export_finished,
+            on_error=lambda msg: self.append_export_output(f"错误: {msg}\n"),
+        )
 
     def append_export_output(self, text):
         """添加导出输出"""

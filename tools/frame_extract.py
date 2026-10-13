@@ -8,6 +8,7 @@ from tkinter import ttk, messagebox, filedialog
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ui_theme
+import img_io   # 图片写入（兼容中文路径，cv2.imwrite 不支持非 ASCII 路径）
 
 
 class VideoFrameExtractorGUI:
@@ -674,15 +675,15 @@ class VideoFrameExtractorGUI:
                     output_dir,
                     f"frame_{frame_count:06d}_time_{current_time:.3f}s.jpg"
                 )
-                success = cv2.imwrite(save_path, frame)
+                # img_io.imwrite 兼容中文路径；cv2.imwrite 在非 ASCII 路径下会直接失败
+                success = img_io.imwrite(save_path, frame)
                 if success:
                     extracted_count += 1
                 else:
-                    # imwrite 返回 False 表示这一帧没写成功（磁盘满、权限不足、
-                    # 路径过长或编码器不支持等），必须记录并计入失败
+                    # 写入失败（磁盘满、权限不足、路径过长等），必须记录并计入失败
                     failed_count += 1
                     self._ui_call(
-                        lambda p=save_path: self._log(f"保存失败（imwrite 返回 False）：{p}")
+                        lambda p=save_path: self._log(f"保存失败：{p}")
                     )
 
             # 指定帧模式：若所有目标帧都取完则提前结束

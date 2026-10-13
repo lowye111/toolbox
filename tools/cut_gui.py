@@ -363,15 +363,22 @@ class ImageCropApp:
                 fail_count += 1
                 self.failed_files.append(f"{os.path.basename(filepath)}（{e}）")
 
-            # 更新进度
-            self.processed_count.set(str(success_count + fail_count))
-            progress = ((idx + 1) / len(self.image_files)) * 100
-            self.progress_bar["value"] = progress
-            self.root.update_idletasks()
+            # 更新进度（经 after 回到主线程：Tk 不是线程安全的，
+            # 直接在后台线程里操作控件可能卡死或崩溃）
+            self.root.after(0, self._update_progress_ui, success_count + fail_count,
+                            (idx + 1) / len(self.image_files) * 100)
 
         # 完成
+        self.root.after(0, self._finish_cropping, success_count, fail_count, output_folder)
+
+    def _update_progress_ui(self, done, percent):
+        self.processed_count.set(str(done))
+        self.progress_bar["value"] = percent
+
+    def _finish_cropping(self, success_count, fail_count, output_folder):
         self.is_processing = False
         self.status_label.config(text=f"完成！成功: {success_count} | 失败: {fail_count}")
+
         result_msg = f"批量裁剪完成！\n成功: {success_count} 张\n失败: {fail_count} 张\n输出目录: {output_folder}"
         if self.failed_files:
             preview = "\n".join(f"· {item}" for item in self.failed_files[:5])

@@ -218,25 +218,25 @@ class FileRenamerApp:
                 })
         return files
 
-    def preview_changes(self):
-        files = self.get_files_info()
-        if files is None:
-            return
+    def plan_renames(self, files):
+        """按当前参数算出重命名计划，返回 (计划列表, 错误信息)。
 
-        self.preview_text.delete(1.0, tk.END)
+        计划列表元素为 (源文件dict, 新文件名)，顺序即实际执行顺序。
+        预览与执行都使用这一份计算，避免两处逻辑各写一遍而结果不一致
+        （此前预览与 execute_* 是两套复制的代码）。
 
+        数字模式在"增加"时按数值降序、在"减少"时升序：
+        这样先处理会被别人占用的名字，避免 os.rename 相互撞名。
+        """
         if self.function_var.get() == "number_modify":
-            self.preview_number_modify(files)
-        else:
-            self.preview_filename_modify(files)
+            try:
+                range_from = int(self.range_from.get())
+                range_to = int(self.range_to.get())
+                modify_value = int(self.modify_value.get())
+            except ValueError:
+                return None, "请输入有效的数字！"
 
-    def preview_number_modify(self, files):
-        try:
-            range_from = int(self.range_from.get())
-            range_to = int(self.range_to.get())
-            modify_value = int(self.modify_value.get())
             operation = self.operation_var.get()
-
             target_files = []
             for f in files:
                 if _is_ascii_number(f['name']):
@@ -244,86 +244,59 @@ class FileRenamerApp:
                     if range_from <= num <= range_to:
                         target_files.append(f)
 
-            target_files.sort(key=lambda x: int(x['name']))
+            target_files.sort(key=lambda x: int(x['name']), reverse=(operation == "+"))
 
-            if operation == "+":
-                target_files.reverse()
-
-            self.preview_text.insert(tk.END, f"📊 找到 {len(target_files)} 个符合条件的文件\n")
-            self.preview_text.insert(tk.END, "─" * 50 + "\n")
-
+            plan = []
             for f in target_files:
                 old_num = int(f['name'])
                 new_num = old_num + modify_value if operation == "+" else old_num - modify_value
-                new_name = f"{new_num}{f['ext']}"
-                arrow = "→" if operation == "+" else "←"
-                self.preview_text.insert(tk.END, f"{f['original_name']:30} {arrow} {new_name}\n")
+                plan.append((f, f"{new_num}{f['ext']}"))
+            return plan, None
 
-            self.status_var.set(f"预览完成: {len(target_files)} 个文件将被修改")
-
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字！")
-
-    def preview_filename_modify(self, files):
+        # 文件名模式：非数字名按"原主名"分组，同组共用一个编号
         try:
             start_num = int(self.start_number.get())
-
-            non_digit_files = [f for f in files if not _is_ascii_number(f['name'])]
-
-            name_groups = {}
-            for f in non_digit_files:
-                base_name = f['name']
-                if base_name not in name_groups:
-                    name_groups[base_name] = []
-                name_groups[base_name].append(f)
-
-            self.preview_text.insert(tk.END, f"📝 找到 {len(non_digit_files)} 个非数字命名的文件\n")
-            self.preview_text.insert(tk.END, "─" * 50 + "\n")
-
-            current_num = start_num
-            for base_name, group in name_groups.items():
-                for f in group:
-                    new_name = f"{current_num}{f['ext']}"
-                    self.preview_text.insert(tk.END, f"{f['original_name']:30} → {new_name}\n")
-                current_num += 1
-
-            self.status_var.set(f"预览完成: {len(non_digit_files)} 个文件将被重命名")
-
         except ValueError:
-            messagebox.showerror("错误", "请输入有效的起始数字！")
+            return None, "请输入有效的起始数字！"
 
-    def collect_target_names(self, files):
-        """按当前参数算出本批次将产生的目标文件名（只读计算，不修改任何文件），参数非法时返回 None"""
-        target_names = []
-        if self.function_var.get() == "number_modify":
-            try:
-                range_from = int(self.range_from.get())
-                range_to = int(self.range_to.get())
-                modify_value = int(self.modify_value.get())
-            except ValueError:
-                return None
-            operation = self.operation_var.get()
-            for f in files:
-                if _is_ascii_number(f['name']):
-                    num = int(f['name'])
-                    if range_from <= num <= range_to:
-                        new_num = num + modify_value if operation == "+" else num - modify_value
-                        target_names.append(f"{new_num}{f['ext']}")
-        else:
-            try:
-                start_num = int(self.start_number.get())
-            except ValueError:
-                return None
-            name_groups = {}
-            for f in files:
-                if not _is_ascii_number(f['name']):
-                    name_groups.setdefault(f['name'], []).append(f)
-            current_num = start_num
-            for base_name, group in name_groups.items():
-                for f in group:
-                    target_names.append(f"{current_num}{f['ext']}")
-                current_num += 1
-        return target_names
+        name_groups = {}
+        for f in files:
+            if not _is_ascii_number(f['name']):
+                name_groups.setdefault(f['name'], []).append(f)
+
+        plan = []
+        current_num = start_num
+        for _base_name, group in name_groups.items():
+            for f in group:
+                plan.append((f, f"{current_num}{f['ext']}"))
+            current_num += 1
+        return plan, None
+
+    def preview_changes(self):
+        files = self.get_files_info()
+        if files is None:
+            return
+
+        self.preview_text.delete(1.0, tk.END)
+
+        plan, err = self.plan_renames(files)
+        if plan is None:
+            messagebox.showerror("错误", err)
+            return
+
+        is_number = self.function_var.get() == "number_modify"
+        icon = "📊" if is_number else "📝"
+        kind = "符合条件" if is_number else "非数字命名"
+        arrow = "→" if (not is_number or self.operation_var.get() == "+") else "←"
+
+        self.preview_text.insert(tk.END, f"{icon} 找到 {len(plan)} 个{kind}的文件\n")
+        self.preview_text.insert(tk.END, "─" * 50 + "\n")
+        for f, new_name in plan:
+            self.preview_text.insert(
+                tk.END, f"{f['original_name']:30} {arrow} {new_name}\n")
+
+        action = "修改" if is_number else "重命名"
+        self.status_var.set(f"预览完成: {len(plan)} 个文件将被{action}")
 
     def execute_rename(self):
         if not messagebox.askyesno("确认", "确定要执行重命名操作吗？此操作不可逆！"):
@@ -333,27 +306,30 @@ class FileRenamerApp:
         if files is None:
             return
 
-        if self.save_in_place.get():
+        plan, err = self.plan_renames(files)
+        if plan is None:
+            messagebox.showerror("错误", err)
+            return
+        if not plan:
+            messagebox.showinfo("提示", "没有符合条件的文件，无需执行")
+            return
+
+        in_place = self.save_in_place.get()
+        if in_place:
             target_dir = self.source_path.get()
         else:
             target_dir = self.target_path.get()
             os.makedirs(target_dir, exist_ok=True)
 
-        # 冲突检查：复制模式（shutil.copy2）会静默覆盖目标目录中的同名文件，执行前先确认
-        if not self.save_in_place.get():
-            target_names = self.collect_target_names(files)
-            if target_names is None:
-                return
+        # 冲突检查：复制模式（shutil.copy2）会静默覆盖目标目录中的同名文件
+        if not in_place:
             conflicts = []
-            if os.path.isdir(target_dir):
-                for name in target_names:
-                    if os.path.exists(os.path.join(target_dir, name)):
-                        conflicts.append(name)
             seen = set()
-            for name in target_names:
-                if name in seen and name not in conflicts:
-                    conflicts.append(name)
-                seen.add(name)
+            for _f, new_name in plan:
+                if new_name in seen or os.path.exists(os.path.join(target_dir, new_name)):
+                    if new_name not in conflicts:
+                        conflicts.append(new_name)
+                seen.add(new_name)
             if conflicts:
                 preview = "\n".join(conflicts[:10])
                 more = f"\n... 等共 {len(conflicts)} 个" if len(conflicts) > 10 else ""
@@ -365,103 +341,29 @@ class FileRenamerApp:
 
         success_count = 0
         error_count = 0
-
-        if self.function_var.get() == "number_modify":
-            success_count, error_count = self.execute_number_modify(files, target_dir)
-        else:
-            success_count, error_count = self.execute_filename_modify(files, target_dir)
+        errors = []
+        for f, new_name in plan:
+            try:
+                new_path = os.path.join(target_dir, new_name)
+                if in_place:
+                    os.rename(f['path'], new_path)
+                else:
+                    shutil.copy2(f['path'], new_path)
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                errors.append(f"{f['original_name']}: {e}")
 
         result_msg = f"✅ 完成！成功: {success_count} | 失败: {error_count}"
-        messagebox.showinfo("完成", result_msg)
+        if errors:
+            # 把失败原因显示出来，而不是只打印到控制台
+            detail = "\n".join(errors[:5])
+            more = f"\n... 等共 {len(errors)} 个" if len(errors) > 5 else ""
+            messagebox.showwarning("部分失败", f"{result_msg}\n\n{detail}{more}")
+        else:
+            messagebox.showinfo("完成", result_msg)
         self.status_var.set(result_msg)
         self.preview_changes()
-
-    def execute_number_modify(self, files, target_dir):
-        try:
-            range_from = int(self.range_from.get())
-            range_to = int(self.range_to.get())
-            modify_value = int(self.modify_value.get())
-            operation = self.operation_var.get()
-
-            target_files = []
-            for f in files:
-                if _is_ascii_number(f['name']):
-                    num = int(f['name'])
-                    if range_from <= num <= range_to:
-                        target_files.append(f)
-
-            if operation == "+":
-                target_files.sort(key=lambda x: int(x['name']), reverse=True)
-            else:
-                target_files.sort(key=lambda x: int(x['name']))
-
-            success_count = 0
-            error_count = 0
-
-            for f in target_files:
-                try:
-                    old_num = int(f['name'])
-                    new_num = old_num + modify_value if operation == "+" else old_num - modify_value
-                    new_name = f"{new_num}{f['ext']}"
-
-                    if self.save_in_place.get():
-                        new_path = os.path.join(target_dir, new_name)
-                        os.rename(f['path'], new_path)
-                    else:
-                        new_path = os.path.join(target_dir, new_name)
-                        shutil.copy2(f['path'], new_path)
-
-                    success_count += 1
-                except Exception as e:
-                    print(f"处理文件 {f['original_name']} 时出错: {e}")
-                    error_count += 1
-
-            return success_count, error_count
-
-        except Exception as e:
-            messagebox.showerror("错误", f"执行过程中出错: {e}")
-            return 0, 0
-
-    def execute_filename_modify(self, files, target_dir):
-        try:
-            start_num = int(self.start_number.get())
-
-            non_digit_files = [f for f in files if not _is_ascii_number(f['name'])]
-
-            name_groups = {}
-            for f in non_digit_files:
-                base_name = f['name']
-                if base_name not in name_groups:
-                    name_groups[base_name] = []
-                name_groups[base_name].append(f)
-
-            success_count = 0
-            error_count = 0
-            current_num = start_num
-
-            for base_name, group in name_groups.items():
-                for f in group:
-                    try:
-                        new_name = f"{current_num}{f['ext']}"
-
-                        if self.save_in_place.get():
-                            new_path = os.path.join(target_dir, new_name)
-                            os.rename(f['path'], new_path)
-                        else:
-                            new_path = os.path.join(target_dir, new_name)
-                            shutil.copy2(f['path'], new_path)
-
-                        success_count += 1
-                    except Exception as e:
-                        print(f"处理文件 {f['original_name']} 时出错: {e}")
-                        error_count += 1
-                current_num += 1
-
-            return success_count, error_count
-
-        except Exception as e:
-            messagebox.showerror("错误", f"执行过程中出错: {e}")
-            return 0, 0
 
     def clear_preview(self):
         self.preview_text.delete(1.0, tk.END)
