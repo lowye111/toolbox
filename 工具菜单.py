@@ -13,6 +13,13 @@ LONG_PRESS_MS = 350
 # 判定为"开始拖动"前允许的鼠标移动量（像素）；超过则视为误触，取消长按
 DRAG_TOLERANCE = 6
 
+# ---- 拖动动画参数 ----
+CARD_GAP = 10          # 卡片之间的垂直间距
+ANIM_INTERVAL = 12     # 动画帧间隔（毫秒），约 80fps
+ANIM_EASE = 0.30       # 其它卡片让位时每帧向目标靠近的比例（越大越快）
+SETTLE_EPS = 0.6       # 与目标距离小于该值即吸附，避免长尾抖动
+DRAG_SHADOW = 3        # 拖动中卡片阴影偏移量（营造"抬起"感）
+
 
 class ToolMenuApp:
     def __init__(self, root):
@@ -35,9 +42,10 @@ class ToolMenuApp:
         ]
 
         # 卡片控件与拖动状态
-        self.cards = {}          # file -> {"card":..., "widgets":[...]}
+        self.cards = {}          # file -> {"card","widgets","tool","y","target_y","lifted"}
         self.drag = None         # 拖动中的临时状态
         self._order_dirty = False
+        self._anim_job = None    # 位移动画的 after id
 
         self._load_order()
         self._create_widgets()
@@ -121,20 +129,97 @@ class ToolMenuApp:
                  font=ui_theme.ui_font(9)).pack(anchor="w")
 
     def _render_cards(self):
-        """按 self.tools 的顺序重建卡片"""
+        """按 self.tools 的顺序重建卡片（用 place 绝对定位，便于做位移动画）"""
         for child in self.scrollable_frame.winfo_children():
             child.destroy()
         self.cards.clear()
         for tool in self.tools:
             self._create_card(self.scrollable_frame, tool)
+        # 重建后先把卡片摆到各自的目标位置（无动画）
+        self.scrollable_frame.update_idletasks()
+        self._layout_cards(animate=False)
+
+    def _card_height(self):
+        """卡片高度：取一张实测值，避免每帧重复测量导致抖动"""
+        for tool in self.tools:
+            info = self.cards.get(tool["file"])
+            if info:
+                try:
+                    h = info["card"].winfo_reqheight()
+                    if h > 1:
+                        return h
+                except Exception:
+                    pass
+        return 64
+
+    def _slot_y(self, index):
+        """第 index 个卡片的目标 y 坐标"""
+        return index * (self._card_height() + CARD_GAP)
+
+    def _layout_cards(self, animate=True):
+        """把每张卡片移动到它当前顺序对应的位置。
+
+        animate=True 时用逐帧缓动（各自卡片向目标值靠近），
+        这样换位时有平滑的"让位"动画，而不是瞬间跳过去。
+        """
+        frame = self.scrollable_frame
+        h = self._card_height()
+        total = max(1, len(self.tools) * (h + CARD_GAP))
+        frame.configure(height=total)
+
+        for i, tool in enumerate(self.tools):
+            info = self.cards.get(tool["file"])
+            if not info:
+                continue
+            card = info["card"]
+            target = self._slot_y(i)
+            info["target_y"] = target
+            if not animate:
+                info["y"] = target
+                card.place(x=0, relwidth=1.0, y=target, height=h)
+            elif info.get("y") is None:
+                info["y"] = target
+                card.place(x=0, relwidth=1.0, y=target, height=h)
+        if animate:
+            self._anim_step()
+
+    def _anim_step(self):
+        """一帧缓动：让每张卡片朝自己的目标槽位靠近一点"""
+        self._anim_job = None
+        moving = False
+        for tool in self.tools:
+            info = self.cards.get(tool["file"])
+            if not info or info.get("y") is None:
+                continue
+            cur = info["y"]
+            target = info.get("target_y", cur)
+            diff = target - cur
+            # 正在被拖动的卡片不受缓动影响（它的位置由鼠标决定）
+            if self.drag and self.drag.get("active") and info["tool"] is self.drag["tool"]:
+                continue
+            if abs(diff) < SETTLE_EPS:
+                if cur != target:
+                    info["y"] = target
+                    info["card"].place_configure(y=int(target))
+                continue
+            moving = True
+            new_y = cur + diff * ANIM_EASE
+            info["y"] = new_y
+            info["card"].place_configure(y=int(round(new_y)))
+        if moving:
+            self._anim_job = self.root.after(ANIM_INTERVAL, self._anim_step)
 
     def _create_card(self, parent, tool):
-        """创建单个工具卡片（悬停高亮、短按启动、长按拖动排序）"""
+        """创建单个工具卡片（悬停高亮、短按启动、长按拖动排序）
+
+        卡片用 place 绝对定位（而不是 pack），这样拖动时可以对 y 坐标做动画。
+        """
         c = ui_theme.COLORS
 
+        # 卡片固定 1px 边框；拖动高亮改用外层额外边框，避免改 highlightthickness
+        # 导致尺寸变化、整列卡片跟着抖动
         card = tk.Frame(parent, bg=c["surface"], highlightbackground=c["border"],
                         highlightthickness=1, cursor="hand2")
-        card.pack(fill=tk.X, pady=(0, 10))
 
         row = tk.Frame(card, bg=c["surface"])
         row.pack(fill=tk.X, padx=16, pady=13)
@@ -158,9 +243,16 @@ class ToolMenuApp:
         arrow.pack(side=tk.RIGHT, padx=(10, 2))
 
         widgets = [card, row, icon, text_box, name, desc, arrow]
-        self.cards[tool["file"]] = {"card": card, "widgets": widgets, "tool": tool}
+        self.cards[tool["file"]] = {
+            "card": card, "widgets": widgets, "tool": tool,
+            "y": None,          # 当前显示位置（动画插值用，浮点）
+            "target_y": 0,      # 目标槽位
+            "lifted": False,    # 是否处于"拿起"状态
+        }
 
         def set_hover(hover):
+            if self.cards.get(tool["file"], {}).get("lifted"):
+                return          # 拖动中不叠加 hover 效果
             bg = c["hover"] if hover else c["surface"]
             for w in widgets:
                 w.configure(bg=bg)
@@ -194,20 +286,35 @@ class ToolMenuApp:
             "cancelled": False,    # 是否因移动过多而取消
             "timer": None,
             "insert_index": None,
+            "grab_dy": 0,          # 按下点相对卡片顶部的偏移（拖动时保持不变）
         }
         self.drag["timer"] = self.root.after(LONG_PRESS_MS, self._enter_drag_mode)
 
     def _enter_drag_mode(self):
-        """长按到时：进入拖动模式（此时才会显示拖动反馈）"""
+        """长按到时：进入拖动模式（把卡片"抬起来"）"""
         d = self.drag
         if not d or d["cancelled"]:
             return
         d["active"] = True
-        c = ui_theme.COLORS
-        card = d["card"]
-        card.configure(highlightbackground=c["primary"], highlightthickness=2)
-        # 拖动时改用手型抓取光标；并把卡片稍微"抬起来"一点提示可拖
-        for w in self.cards[d["tool"]["file"]]["widgets"]:
+        info = self.cards.get(d["tool"]["file"])
+        if not info:
+            return
+
+        # 记下抓取点相对卡片顶部的偏移：之后卡片跟随鼠标移动时保持这个偏移，
+        # 手感才像"捏住了卡片的这个位置"，而不是卡片突然跳到鼠标下
+        press_y = d["press_xy"][1]
+        try:
+            d["grab_dy"] = press_y - info["card"].winfo_rooty()
+        except Exception:
+            d["grab_dy"] = 0
+        d["insert_index"] = self.tools.index(d["tool"])
+
+        # 抬起来：换描边颜色但保持 thickness=1（改粗细会让整列卡片抖动），
+        # 用阴影色背景 + 提前抬高一点做视觉反馈
+        info["card"].configure(highlightbackground=ui_theme.COLORS["primary"],
+                               highlightcolor=ui_theme.COLORS["primary"])
+        info["lifted"] = True
+        for w in info["widgets"]:
             w.configure(cursor="fleur")
         self.root.configure(cursor="fleur")
 
@@ -225,15 +332,33 @@ class ToolMenuApp:
                     d["timer"] = None
             return
 
+        self._follow_cursor(event.y_root)
         self._reorder_to(event.y_root)
         self._autoscroll(event.y_root)
 
-    def _reorder_to(self, y_root):
-        """根据鼠标位置，把正在拖的卡片移到对应下标。
+    def _follow_cursor(self, y_root):
+        """让被拖动的卡片跟随鼠标（保持按下时的抓取偏移）"""
+        d = self.drag
+        info = self.cards.get(d["tool"]["file"])
+        if not info:
+            return
+        try:
+            frame_top = self.scrollable_frame.winfo_rooty()
+        except Exception:
+            return
+        # y_root 是屏幕坐标，转成滚动内容里的坐标
+        canvas_y = y_root - self.canvas.winfo_rooty()
+        content_y = self.canvas.canvasy(canvas_y)
+        new_y = content_y - d["grab_dy"]
+        # 限制在内容范围内，避免拖出边界后卡片"飞走"
+        max_y = max(0, len(self.tools) * (self._card_height() + CARD_GAP))
+        new_y = max(0, min(new_y, max_y))
+        info["y"] = new_y
+        info["target_y"] = new_y
+        info["card"].place_configure(y=int(round(new_y)))
 
-        这里刻意用"重新 pack"而不是销毁重建卡片：拖动中若销毁了正被按住的
-        控件，Tk 的隐式抓取会中断，后续 B1-Motion 就收不到了。
-        """
+    def _reorder_to(self, y_root):
+        """根据鼠标位置，把正在拖的卡片插到对应下标（只改顺序，位置交给动画）"""
         d = self.drag
         index = self._index_at(y_root)
         if index is None or index == d.get("insert_index"):
@@ -245,52 +370,57 @@ class ToolMenuApp:
         if index == cur:
             return
 
+        # 只交换顺序并更新各卡片的目标位置，实际位移交给缓动动画：
+        # 这样其它卡片是"滑开让位"，而不是瞬间跳过去
         self.tools.pop(cur)
         self.tools.insert(index, tool)
-
-        # 按新顺序重新 pack（控件复用，不销毁）
-        for t in self.tools:
-            info = self.cards.get(t["file"])
-            if info:
-                info["card"].pack_forget()
-        for t in self.tools:
-            info = self.cards.get(t["file"])
-            if info:
-                info["card"].pack(fill=tk.X, pady=(0, 10))
-        self.scrollable_frame.update_idletasks()
+        self._layout_cards(animate=True)
 
     def _index_at(self, y_root):
-        """算出鼠标纵向位置对应的插入下标"""
+        """算出鼠标纵向位置对应的插入下标。
+
+        用卡片的目标槽位（而非当前动画位置）计算：动画进行中卡片位置是
+        滞后的，若按当前位置算，换位判定会来回抖动、反复插入。
+        """
         n = len(self.tools)
-        for i, tool in enumerate(self.tools):
-            info = self.cards.get(tool["file"])
-            if not info:
-                continue
-            card = info["card"]
-            try:
-                top = card.winfo_rooty()
-                mid = top + card.winfo_height() / 2
-            except Exception:
-                continue
-            if y_root < mid:
-                return i
-        return n - 1
+        if n == 0:
+            return 0
+        h = self._card_height()
+        try:
+            content_top = self.scrollable_frame.winfo_rooty()
+        except Exception:
+            return n - 1
+        rel = y_root - content_top
+        idx = int(rel // (h + CARD_GAP))
+        return max(0, min(idx, n - 1))
 
     def _autoscroll(self, y_root):
-        """拖到可视区域上下边缘时自动滚动"""
+        """拖到可视区域上下边缘时自动滚动（越靠边滚得越快）"""
         try:
             top = self.canvas.winfo_rooty()
             height = self.canvas.winfo_height()
         except Exception:
             return
-        margin = 28
+        margin = 34
+        step = 0
         if y_root < top + margin:
-            self.canvas.yview_scroll(-1, "units")
+            ratio = 1.0 - max(0.0, (y_root - top)) / margin
+            step = -max(1, int(round(ratio * 3)))
         elif y_root > top + height - margin:
-            self.canvas.yview_scroll(1, "units")
+            ratio = 1.0 - max(0.0, (top + height - y_root)) / margin
+            step = max(1, int(round(ratio * 3)))
+        if step:
+            self.canvas.yview_scroll(step, "units")
+            # 滚动后内容整体位移，拖动中的卡片要重新贴合鼠标
+            self._follow_cursor(y_root)
 
     def _on_release(self, event, tool):
-        """松手：短按则启动工具；长按拖动过则保存顺序（不启动）"""
+        """松手：短按则启动工具；长按拖动过则保存顺序（不启动）
+
+        注意：必须以 self.drag["tool"] 为准，不能用事件参数里的 tool。
+        拖动过程中顺序会变化，松手时鼠标下的卡片可能已经不是按住的那张，
+        用事件参数会导致被拖卡片的高亮状态清不掉。
+        """
         d = self.drag
         self.drag = None
         self.root.configure(cursor="")
@@ -299,15 +429,29 @@ class ToolMenuApp:
             self.root.after_cancel(d["timer"])
             d["timer"] = None
 
+        dragged_tool = d["tool"] if d else tool
         was_drag = bool(d and d["active"])
-        info = self.cards.get(tool["file"])
+
+        # 清理被拖卡片的状态（用真正的被拖对象）
+        info = self.cards.get(dragged_tool["file"])
         if info:
+            info["lifted"] = False
             info["card"].configure(highlightbackground=ui_theme.COLORS["border"],
-                                   highlightthickness=1)
+                                   highlightcolor=ui_theme.COLORS["border"])
             for w in info["widgets"]:
                 w.configure(cursor="hand2")
+        # 保险起见，把所有卡片的高亮都复位（避免任何残留）
         if was_drag:
-            # 拖动结束：保存顺序，并且不启动工具
+            for t in self.tools:
+                other = self.cards.get(t["file"])
+                if other and other["lifted"]:
+                    other["lifted"] = False
+                    other["card"].configure(highlightbackground=ui_theme.COLORS["border"],
+                                            highlightcolor=ui_theme.COLORS["border"])
+
+        if was_drag:
+            # 松手后让卡片平滑归位到它所属的槽位
+            self._layout_cards(animate=True)
             self._save_order()
             if info:
                 self._flash(info["card"], "✅ 顺序已保存")
