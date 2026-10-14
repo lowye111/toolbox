@@ -3,3 +3,15 @@ __pycache__/
 debug.log
 config.json
 notes/
+
+# 抓歌打包器：只提交代码，下载的音乐/封面/歌词与打包产物不入库
+# （都是可再生缓存，本机这一份就有 100+ MB，提交会永久撑大仓库）
+tools/music_grabber/output/
+tools/music_grabber/_work/
+tools/music_grabber/*.mp3
+tools/music_grabber/*.flac
+tools/music_grabber/*.zip
+tools/music_grabber/*.lrc
+tools/music_grabber/*.jpg
+tools/music_grabber/*.pkl
+tools/music_grabber/*/

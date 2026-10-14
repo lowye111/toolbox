@@ -8,6 +8,18 @@ my toolbox for yolo learner
 双击「启动工具.bat」打开工具菜单，点击相应按钮启动对应工具。
 首次启动时会自动检测运行依赖，缺少时会提示一键安装。
 
+### 卡片排序
+
+工具多了以后可以按自己的习惯调整顺序：
+
+- **点击**卡片 = 启动该工具（和以前一样）
+- **长按**卡片约 0.35 秒后进入拖动模式（卡片高亮、光标变抓手），
+  上下拖动即可调整位置，松手自动保存
+- 顺序存在 `config.json` 的 `tool_order` 里，下次打开保持；
+  想恢复默认顺序，把该项清空（`[]`）即可
+- 拖动时把鼠标移到列表上下边缘会自动滚动
+- 新增的工具会自动排到末尾，卸载的工具会被忽略，不会打乱已有顺序
+
 ## 环境要求
 
 - Windows + Python 3.8 及以上（安装时勾选 “Add Python to PATH”）
@@ -27,6 +39,7 @@ my toolbox for yolo learner
 | deepseek_api_key_enc | 由工具自动生成的加密 Key（不要手填） |
 | deepseek_model | AI 识别模型名，默认 deepseek-flash（可选 deepseek-v4-pro） |
 | notes_dir | 参数扫描工具「说明」文件的保存目录（默认 toolbox/notes） |
+| tool_order | 菜单卡片的排列顺序（长按拖动后自动写入，清空则恢复默认） |
 
 ## API Key 怎么放才安全
 

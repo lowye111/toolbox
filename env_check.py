@@ -151,6 +151,7 @@ DEFAULT_CONFIG = {
     "deepseek_api_key_enc": "",          # 加密后的 API Key（由工具自动生成，绑定本机 Windows 账户）
     "deepseek_model": "deepseek-flash",  # 可选：DeepSeek 模型名（官方列表：deepseek-flash / deepseek-v4-pro）
     "notes_dir": "",                     # 可选：参数扫描工具说明文件的保存目录（留空=工具目录下 notes 文件夹）
+    "tool_order": [],                    # 可选：工具箱菜单里卡片的排列顺序（长按拖动后自动保存）
 }
 
 # 模块名 -> pip 包名
