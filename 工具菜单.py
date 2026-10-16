@@ -19,6 +19,7 @@ ANIM_INTERVAL = 12     # 动画帧间隔（毫秒），约 80fps
 ANIM_EASE = 0.30       # 其它卡片让位时每帧向目标靠近的比例（越大越快）
 SETTLE_EPS = 0.6       # 与目标距离小于该值即吸附，避免长尾抖动
 DRAG_SHADOW = 3        # 拖动中卡片阴影偏移量（营造"抬起"感）
+AUTOSCROLL_MS = 45     # 拖到边缘时自动滚动的间隔（毫秒）
 
 
 class ToolMenuApp:
@@ -44,12 +45,68 @@ class ToolMenuApp:
         # 卡片控件与拖动状态
         self.cards = {}          # file -> {"card","widgets","tool","y","target_y","lifted"}
         self.drag = None         # 拖动中的临时状态
-        self._order_dirty = False
         self._anim_job = None    # 位移动画的 after id
+        self._scroll_job = None  # 自动滚动的 after id
+        self._scroll_dir = 0     # 自动滚动方向（-1 上 / +1 下 / 0 停）
+        self._placeholder = None # 拖动时的目标位置占位槽
+        self._shadow = None      # 拖动时卡片下方的阴影
 
         self._load_order()
         self._create_widgets()
+        # 关窗前取消所有挂起的 after 回调：否则窗口销毁后回调才触发，
+        # Tk 会报 invalid command name "..._anim_step"
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # 兜底：无论窗口以何种方式被销毁（含被外部 destroy），都先撤掉定时器
+        self.root.bind("<Destroy>", self._on_destroy, add="+")
         self.check_environment()
+
+    def _on_destroy(self, event=None):
+        """窗口销毁时撤掉所有挂起的定时器（只处理根窗口自身的事件）
+
+        否则这些 after 回调会在解释器里残留，销毁后才触发，
+        Tk 报 invalid command name "..._anim_step"。
+        """
+        if event is not None and getattr(event, "widget", None) is not self.root:
+            return
+        self._stop_anim()
+        self._stop_autoscroll()
+        if self.drag and self.drag.get("timer"):
+            try:
+                self.root.after_cancel(self.drag["timer"])
+            except Exception:
+                pass
+            self.drag["timer"] = None
+
+    def on_close(self):
+        """关闭窗口：先停掉动画/滚动定时器，再销毁窗口"""
+        self._stop_anim()
+        self._stop_autoscroll()
+        if self.drag and self.drag.get("timer"):
+            try:
+                self.root.after_cancel(self.drag["timer"])
+            except Exception:
+                pass
+        self.drag = None
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _alive(self):
+        """窗口是否仍然存在（销毁后 after 回调可能仍被触发）"""
+        try:
+            return bool(self.root.winfo_exists())
+        except Exception:
+            return False
+
+    def _stop_anim(self):
+        """取消待执行的动画帧"""
+        if self._anim_job is not None:
+            try:
+                self.root.after_cancel(self._anim_job)
+            except Exception:
+                pass
+            self._anim_job = None
 
     # ==================== 顺序持久化 ====================
 
@@ -57,27 +114,35 @@ class ToolMenuApp:
         """按 config.json 里保存的顺序重排 self.tools。
 
         未记录的新工具按定义顺序追加到末尾；
-        已不存在的工具会被忽略。这样以后新增/删除工具都不会乱。
+        已不存在的工具会被忽略；重复项只取第一次出现，
+        避免配置里混入重复路径时整份自定义顺序被丢弃。
+        这样以后新增/删除工具都不会乱。
         """
         saved = env_check.load_config().get("tool_order") or []
         if not isinstance(saved, list) or not saved:
             return
         by_file = {t["file"]: t for t in self.tools}
-        ordered = [by_file[f] for f in saved if f in by_file]
-        known = {t["file"] for t in ordered}
-        ordered.extend(t for t in self.tools if t["file"] not in known)
+        ordered, seen = [], set()
+        for f in saved:
+            if f in by_file and f not in seen:
+                seen.add(f)
+                ordered.append(by_file[f])
+        ordered.extend(t for t in self.tools if t["file"] not in seen)
         if len(ordered) == len(self.tools):
             self.tools = ordered
 
     def _save_order(self):
-        """把当前顺序写回 config.json"""
+        """把当前顺序写回 config.json，返回是否保存成功。
+
+        必须检查 save_config 的返回值：之前无论写盘成功与否都会提示
+        "顺序已保存"，用户会以为已经记住，实际下次打开又变回去了。
+        """
         try:
             cfg = env_check.load_config()
             cfg["tool_order"] = [t["file"] for t in self.tools]
-            env_check.save_config(cfg)
-            self._order_dirty = False
-        except Exception as e:
-            messagebox.showwarning("提示", f"顺序保存失败：{e}")
+            return bool(env_check.save_config(cfg))
+        except Exception:
+            return False
 
     # ==================== 界面 ====================
 
@@ -181,11 +246,24 @@ class ToolMenuApp:
                 info["y"] = target
                 card.place(x=0, relwidth=1.0, y=target, height=h)
         if animate:
+            self._start_anim()
+
+    def _start_anim(self):
+        """确保动画在跑：已有待执行帧时不重复安排。
+
+        之前是每次 _layout_cards 都直接调 _anim_step()，而 _anim_step 又会
+        安排下一帧；快速连续拖动时会叠出多条回调链，导致卡片忽快忽慢、
+        动画结束后还可能残留回调。这里保证任何时刻最多只有一个待执行帧。
+        """
+        if self._anim_job is None:
             self._anim_step()
 
     def _anim_step(self):
         """一帧缓动：让每张卡片朝自己的目标槽位靠近一点"""
         self._anim_job = None
+        # 窗口已销毁时不要再动控件，也不要再排下一帧
+        if not self._alive():
+            return
         moving = False
         for tool in self.tools:
             info = self.cards.get(tool["file"])
@@ -309,14 +387,77 @@ class ToolMenuApp:
             d["grab_dy"] = 0
         d["insert_index"] = self.tools.index(d["tool"])
 
-        # 抬起来：换描边颜色但保持 thickness=1（改粗细会让整列卡片抖动），
-        # 用阴影色背景 + 提前抬高一点做视觉反馈
+        # 抬起来：换描边颜色但保持 thickness=1（改粗细会让整列卡片抖动）
         info["card"].configure(highlightbackground=ui_theme.COLORS["primary"],
                                highlightcolor=ui_theme.COLORS["primary"])
         info["lifted"] = True
         for w in info["widgets"]:
             w.configure(cursor="fleur")
         self.root.configure(cursor="fleur")
+
+        self._create_drag_visuals(info)
+        self._update_drag_visuals()
+
+    def _create_drag_visuals(self, info):
+        """创建拖动时的"阴影"与"占位槽"，让落点更直观。
+
+        占位槽标出卡片将落到哪个槽位；阴影垫在被拖卡片下方偏移一点，
+        营造"拿起来了"的层次感（原先只有描边变色，抬起感很弱）。
+        """
+        c = ui_theme.COLORS
+        parent = self.scrollable_frame
+        h = self._card_height()
+
+        # 占位槽：虚线感的浅色框，标出目标槽位
+        self._placeholder = tk.Frame(parent, bg=c["primary_soft"],
+                                     highlightbackground=c["primary"],
+                                     highlightthickness=1)
+        self._placeholder.place(x=0, relwidth=1.0, y=0, height=h)
+
+        # 阴影：比卡片低一层、向下偏移 DRAG_SHADOW 像素
+        self._shadow = tk.Frame(parent, bg=c["border"])
+        self._shadow.place(x=0, relwidth=1.0, y=0, height=h)
+
+        # 保证层级：占位槽在最下、阴影其次、被拖卡片在最上
+        self._placeholder.lower()
+        self._shadow.lift()
+        info["card"].lift()
+
+    def _update_drag_visuals(self):
+        """把占位槽摆到目标槽位、阴影跟随被拖卡片"""
+        d = self.drag
+        if not d:
+            return
+        info = self.cards.get(d["tool"]["file"])
+        if not info:
+            return
+        h = self._card_height()
+
+        # 占位槽停在"当前插入下标"对应的槽位
+        if self._placeholder is not None:
+            try:
+                slot = self._slot_y(self.tools.index(d["tool"]))
+                self._placeholder.place_configure(y=int(round(slot)), height=h)
+            except Exception:
+                pass
+
+        # 阴影跟着被拖卡片，向下偏移一点
+        if self._shadow is not None:
+            try:
+                self._shadow.place_configure(y=int(round(info["y"])) + DRAG_SHADOW, height=h)
+            except Exception:
+                pass
+
+    def _destroy_drag_visuals(self):
+        """清理拖动时的阴影与占位槽"""
+        for attr in ("_shadow", "_placeholder"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def _on_motion(self, event):
         d = self.drag
@@ -343,12 +484,11 @@ class ToolMenuApp:
         if not info:
             return
         try:
-            frame_top = self.scrollable_frame.winfo_rooty()
+            canvas_top = self.canvas.winfo_rooty()
         except Exception:
             return
         # y_root 是屏幕坐标，转成滚动内容里的坐标
-        canvas_y = y_root - self.canvas.winfo_rooty()
-        content_y = self.canvas.canvasy(canvas_y)
+        content_y = self.canvas.canvasy(y_root - canvas_top)
         new_y = content_y - d["grab_dy"]
         # 限制在内容范围内，避免拖出边界后卡片"飞走"
         max_y = max(0, len(self.tools) * (self._card_height() + CARD_GAP))
@@ -356,6 +496,7 @@ class ToolMenuApp:
         info["y"] = new_y
         info["target_y"] = new_y
         info["card"].place_configure(y=int(round(new_y)))
+        self._update_drag_visuals()
 
     def _reorder_to(self, y_root):
         """根据鼠标位置，把正在拖的卡片插到对应下标（只改顺序，位置交给动画）"""
@@ -375,6 +516,7 @@ class ToolMenuApp:
         self.tools.pop(cur)
         self.tools.insert(index, tool)
         self._layout_cards(animate=True)
+        self._update_drag_visuals()
 
     def _index_at(self, y_root):
         """算出鼠标纵向位置对应的插入下标。
@@ -395,24 +537,62 @@ class ToolMenuApp:
         return max(0, min(idx, n - 1))
 
     def _autoscroll(self, y_root):
-        """拖到可视区域上下边缘时自动滚动（越靠边滚得越快）"""
+        """拖到可视区域上下边缘时自动滚动。
+
+        用定时器持续滚动，而不是"每来一个鼠标事件才滚一次"：
+        鼠标停在边缘不动时也要继续滚，否则长列表很难把工具拖到底。
+        速度按离边缘的远近分档，越靠边越快。
+        """
         try:
             top = self.canvas.winfo_rooty()
             height = self.canvas.winfo_height()
         except Exception:
             return
         margin = 34
-        step = 0
+        direction = 0
         if y_root < top + margin:
             ratio = 1.0 - max(0.0, (y_root - top)) / margin
-            step = -max(1, int(round(ratio * 3)))
+            direction = -max(1, int(round(ratio * 3)))
         elif y_root > top + height - margin:
             ratio = 1.0 - max(0.0, (top + height - y_root)) / margin
-            step = max(1, int(round(ratio * 3)))
-        if step:
-            self.canvas.yview_scroll(step, "units")
-            # 滚动后内容整体位移，拖动中的卡片要重新贴合鼠标
-            self._follow_cursor(y_root)
+            direction = max(1, int(round(ratio * 3)))
+
+        self._scroll_dir = direction
+        if direction and self._scroll_job is None:
+            self._scroll_tick()
+        elif not direction:
+            self._stop_autoscroll()
+
+    def _scroll_tick(self):
+        """自动滚动的一帧：按当前方向滚动，并让被拖卡片继续贴合鼠标"""
+        self._scroll_job = None
+        if not self._alive():
+            return
+        step = self._scroll_dir
+        if not step:
+            return
+        before = self.canvas.yview()
+        self.canvas.yview_scroll(step, "units")
+        if self.canvas.yview() != before and self.drag and self.drag.get("active"):
+            # 内容整体位移了，拖动中的卡片要重新贴合鼠标位置
+            try:
+                y_root = self.root.winfo_pointery()
+            except Exception:
+                y_root = None
+            if y_root is not None:
+                self._follow_cursor(y_root)
+        if self._scroll_dir:
+            self._scroll_job = self.root.after(AUTOSCROLL_MS, self._scroll_tick)
+
+    def _stop_autoscroll(self):
+        """停止自动滚动"""
+        self._scroll_dir = 0
+        if self._scroll_job is not None:
+            try:
+                self.root.after_cancel(self._scroll_job)
+            except Exception:
+                pass
+            self._scroll_job = None
 
     def _on_release(self, event, tool):
         """松手：短按则启动工具；长按拖动过则保存顺序（不启动）
@@ -450,11 +630,20 @@ class ToolMenuApp:
                                             highlightcolor=ui_theme.COLORS["border"])
 
         if was_drag:
+            # 停止自动滚动并移除拖动视觉元素
+            self._stop_autoscroll()
+            self._destroy_drag_visuals()
             # 松手后让卡片平滑归位到它所属的槽位
             self._layout_cards(animate=True)
-            self._save_order()
-            if info:
-                self._flash(info["card"], "✅ 顺序已保存")
+            # 保存结果要如实反馈：写盘失败时提示"已保存"会让用户误以为记住了
+            if self._save_order():
+                if info:
+                    self._flash(info["card"], "✅ 顺序已保存")
+            else:
+                messagebox.showwarning(
+                    "提示",
+                    "顺序已调整，但写入 config.json 失败，下次打开会恢复原顺序。\n\n"
+                    "请检查该文件是否被占用或目录不可写。")
             return
 
         # 短按：照旧启动
