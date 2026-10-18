@@ -24,6 +24,10 @@ except Exception:
 VERSION = "AI 识别版"
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
+
+# 界面上可选的模型（也可手工输入其它名字）
+KNOWN_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 
 
 def debug_log(message):
@@ -475,17 +479,92 @@ def get_ai_settings():
     return key, model
 
 
-def ensure_key_field():
-    """确保 config.json 磁盘文件里存在 deepseek 配置项，方便用户填写"""
+def key_source():
+    """返回当前 Key 的来源说明，供界面提示用"""
     if not env_check:
-        return
+        return "unavailable"
+    if (os.environ.get(env_check.ENV_API_KEY) or "").strip():
+        return "env"
     cfg = env_check.load_config()
+    if (cfg.get(env_check.ENC_FIELD) or "").strip():
+        return "encrypted"
+    if (cfg.get("deepseek_api_key") or "").strip():
+        return "plain"
+    return "none"
+
+
+def mask_key(key):
+    """把 Key 打码显示（只留前 6 位和后 4 位）"""
+    key = (key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 12:
+        return key[:2] + "*" * max(0, len(key) - 2)
+    return key[:6] + "…" + key[-4:]
+
+
+def save_ai_settings(key, model):
+    """保存 API Key 与模型名到 config.json，返回 (是否成功, 说明文字)。
+
+    写盘时会由 env_check.save_config 自动把明文 Key 加密成密文
+    （DPAPI，绑定本机 Windows 账户），不会以明文留在磁盘上。
+    """
+    if not env_check:
+        return False, "缺少 env_check 模块，无法保存配置"
+    cfg = env_check.load_config()
+    cfg["deepseek_model"] = (model or "deepseek-flash").strip() or "deepseek-flash"
+
+    key = (key or "").strip()
+    if key:
+        cfg["deepseek_api_key"] = key      # save_config 内会自动加密并清空该字段
+    ok = env_check.save_config(cfg)
+    if not ok:
+        return False, "写入 config.json 失败（文件可能被占用或目录不可写）"
+
+    # 校验密文确实写进去了
+    if key and not (env_check.load_config().get(env_check.ENC_FIELD) or "").strip():
+        return False, "Key 已保存但加密失败，请检查系统 DPAPI 是否可用"
+    return True, "已保存"
+
+
+def test_api_connection(api_key, model):
+    """测试 API Key 是否可用，返回 (是否可用, 说明文字)"""
+    if not (api_key or "").strip():
+        return False, "未填写 API Key"
+    req = urllib.request.Request(
+        DEEPSEEK_MODELS_URL,
+        headers={"Authorization": "Bearer " + api_key.strip()},
+        method="GET",
+    )
     try:
-        raw = json.loads(env_check.CONFIG_PATH.read_text(encoding="utf-8")) if env_check.CONFIG_PATH.exists() else {}
-    except Exception:
-        raw = {}
-    if not all(k in raw for k in ("deepseek_api_key", "deepseek_model")):
-        env_check.save_config(cfg)
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            # 把服务端的原始提示带出来，并说明常见原因：Key 被轮换/删除、复制不全、多了空格
+            detail = ""
+            try:
+                raw = e.read().decode("utf-8", "ignore")
+                info = json.loads(raw).get("error", {})
+                detail = (info.get("message") or "").strip()
+            except Exception:
+                pass
+            msg = f"Key 无效或已失效（HTTP {e.code}）"
+            if detail:
+                msg += f"\n服务端返回：{detail}"
+            msg += ("\n\n请确认：① 该 Key 是否已在服务商后台被轮换或删除；"
+                    "② 是否复制完整（无多余空格）；③ 账号是否欠费/受限。")
+            return False, msg
+        return False, f"请求失败 HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"网络错误：{e.reason}"
+    except Exception as e:
+        return False, f"请求异常：{e}"
+
+    ids = [d.get("id") for d in (body.get("data") or []) if isinstance(d, dict)]
+    if ids and model not in ids:
+        return True, f"Key 可用，但当前模型「{model}」不在可用列表（{', '.join(ids[:4])}）"
+    return True, "Key 可用" + (f"（可用模型：{', '.join(ids[:3])}）" if ids else "")
 
 
 # ==================== 参数说明（手动备注，集中保存） ====================
@@ -752,6 +831,8 @@ class App(tk.Tk):
         self.btn_select_folder.pack(side=tk.LEFT)
         self.btn_ai = ttk.Button(row1, text="🤖 AI 识别", style="Success.TButton", command=self.ai_scan_all)
         self.btn_ai.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_ai_cfg = ttk.Button(row1, text="🔑 API 设置", command=self.open_ai_settings)
+        self.btn_ai_cfg.pack(side=tk.LEFT, padx=(6, 0))
         self.btn_apply_rec = ttk.Button(row1, text="📌 采用AI推荐", command=self.apply_ai_recommend)
         self.btn_apply_rec.pack(side=tk.LEFT, padx=(8, 0))
         self.show_filtered_var = tk.BooleanVar(value=False)
@@ -1350,16 +1431,13 @@ class App(tk.Tk):
         """打开选择窗口，选择要 AI 识别的文件"""
         api_key, _ = get_ai_settings()
         if not api_key:
-            ensure_key_field()
-            messagebox.showinfo(
-                "需要 API Key",
-                "未配置 DeepSeek API Key。推荐用环境变量（不落盘、不会被误提交）：\n\n"
-                "  1) 在当前用户下执行一次：\n"
-                "     setx DEEPSEEK_API_KEY \"sk-你的Key\"\n"
-                "     然后重新打开本工具即可生效。\n\n"
-                "  2) 或者写进根目录 config.json 的 \"deepseek_api_key\" 字段，\n"
-                "     工具会在首次读取时自动加密成 \"deepseek_api_key_enc\"，\n"
-                "     密文绑定本机 Windows 账户，换机器无法解密。")
+            # 没配置 Key：直接打开设置窗口，填完保存后再点一次 AI 识别即可
+            if messagebox.askyesno(
+                    "未配置 API Key",
+                    "还没有配置 DeepSeek API Key。\n\n"
+                    "现在打开设置窗口填写吗？\n"
+                    "（保存时会自动加密，绑定本机 Windows 账户）"):
+                self.open_ai_settings()
             return
 
         files = [fp for fp in self.param_map if self.param_map[fp] and fp not in self.closed_files]
@@ -1367,6 +1445,140 @@ class App(tk.Tk):
             messagebox.showinfo("提示", "请先选择文件夹（没有扫描到含参数的文件）")
             return
         self._open_ai_select_dialog(files)
+
+    def open_ai_settings(self):
+        """打开「AI 识别设置」窗口：输入并保存 API Key / 模型名。
+
+        非模态：用 grab_set 抢焦点，但不阻塞调用方（避免界面卡住）。
+        保存结果以窗口内状态提示为准。
+        """
+        c = ui_theme.COLORS
+        dlg = tk.Toplevel(self)
+        dlg.title("AI 识别设置")
+        dlg.configure(bg=c["bg"])
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
+        cur_key, cur_model = get_ai_settings()
+        src = key_source()
+
+        src_text = {
+            "env": "当前来源：环境变量 DEEPSEEK_API_KEY（优先级最高，界面保存的 Key 会被它覆盖）",
+            "encrypted": "当前来源：config.json 的加密字段（绑定本机 Windows 账户）",
+            "plain": "当前来源：config.json 明文（保存后会转为加密）",
+            "none": "当前尚未配置 Key",
+        }.get(src, "当前尚未配置 Key")
+
+        # 说明区
+        head = tk.Frame(dlg, bg=c["bg"])
+        head.pack(fill=tk.X, padx=16, pady=(14, 6))
+        tk.Label(head, text="🔑 DeepSeek API Key", anchor="w", bg=c["bg"], fg=c["text"],
+                 font=ui_theme.ui_font(11, True)).pack(anchor="w")
+        tk.Label(head, text=src_text, anchor="w", bg=c["bg"], fg=c["text_muted"],
+                 font=ui_theme.ui_font(9), wraplength=520, justify="left").pack(anchor="w", pady=(3, 0))
+
+        body = tk.Frame(dlg, bg=c["bg"])
+        body.pack(fill=tk.X, padx=16, pady=6)
+        body.grid_columnconfigure(1, weight=1)
+
+        # Key 输入
+        tk.Label(body, text="API Key：", bg=c["bg"], fg=c["text"],
+                 font=ui_theme.ui_font(10)).grid(row=0, column=0, sticky="w", pady=4)
+        # 变量显式绑定到本对话框：不指定 master 时会绑到默认根窗口，
+        # 多窗口/多解释器场景下会读到空值
+        key_var = tk.StringVar(master=dlg, value="")
+        key_entry = ttk.Entry(body, textvariable=key_var, width=46, show="•")
+        key_entry.grid(row=0, column=1, sticky="ew", pady=4, padx=(0, 6))
+        key_entry.focus_set()
+
+        show_var = tk.BooleanVar(master=dlg, value=False)
+
+        def toggle_show():
+            key_entry.configure(show="" if show_var.get() else "•")
+
+        ttk.Checkbutton(body, text="显示", variable=show_var,
+                        command=toggle_show).grid(row=0, column=2, sticky="w")
+
+        if cur_key:
+            tk.Label(body, text=f"已保存：{mask_key(cur_key)}（留空则保持不变）",
+                     bg=c["bg"], fg=c["text_muted"], font=ui_theme.ui_font(9),
+                     anchor="w").grid(row=1, column=1, columnspan=2, sticky="w")
+
+        # 模型输入（可编辑下拉）
+        tk.Label(body, text="模型名：", bg=c["bg"], fg=c["text"],
+                 font=ui_theme.ui_font(10)).grid(row=2, column=0, sticky="w", pady=(8, 4))
+        model_var = tk.StringVar(master=dlg, value=cur_model or "deepseek-flash")
+        model_box = ttk.Combobox(body, textvariable=model_var, values=KNOWN_MODELS, width=28)
+        model_box.grid(row=2, column=1, sticky="w", pady=(8, 4))
+        tk.Label(body, text="可直接输入其它模型名", bg=c["bg"], fg=c["text_muted"],
+                 font=ui_theme.ui_font(9)).grid(row=2, column=2, sticky="w")
+
+        # 状态提示
+        status_var = tk.StringVar(master=dlg, value="")
+        status_lbl = tk.Label(dlg, textvariable=status_var, anchor="w", bg=c["bg"],
+                              fg=c["text_secondary"], font=ui_theme.ui_font(9),
+                              wraplength=520, justify="left")
+        status_lbl.pack(fill=tk.X, padx=16, pady=(2, 0))
+
+        def set_status(text, ok=None):
+            status_var.set(text)
+            color = c["text_secondary"]
+            if ok is True:
+                color = c["success"]
+            elif ok is False:
+                color = c["danger"]
+            status_lbl.configure(fg=color)
+
+        # 按钮区
+        btns = tk.Frame(dlg, bg=c["bg"])
+        btns.pack(fill=tk.X, padx=16, pady=(10, 14))
+
+        def on_test():
+            key = key_var.get().strip() or cur_key
+            if not key:
+                set_status("请先填写 API Key", False)
+                return
+            set_status("正在测试连接…")
+            dlg.update_idletasks()
+            ok, msg = test_api_connection(key, model_var.get().strip())
+            set_status(("✅ " if ok else "❌ ") + msg, ok)
+
+        def on_save():
+            key = key_var.get().strip()
+            if not key and not cur_key:
+                set_status("请填写 API Key", False)
+                return
+            ok, msg = save_ai_settings(key if key else cur_key, model_var.get().strip())
+            if not ok:
+                set_status("❌ " + msg, False)
+                return
+            new_key, new_model = get_ai_settings()
+            set_status(
+                f"✅ 已保存（模型：{new_model}，Key：{mask_key(new_key)}）"
+                f"\nKey 已加密保存在 config.json，绑定本机 Windows 账户。", True)
+            key_var.set("")
+
+        ttk.Button(btns, text="测试连接", command=on_test).pack(side=tk.LEFT)
+        ttk.Button(btns, text="保存", style="Primary.TButton",
+                   command=on_save).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        key_entry.bind("<Return>", lambda e: on_save())
+        model_box.bind("<Return>", lambda e: on_save())
+
+        dlg.update_idletasks()
+        try:
+            x = self.winfo_rootx() + max(0, (self.winfo_width() - dlg.winfo_width()) // 2)
+            y = self.winfo_rooty() + 90
+            dlg.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        return dlg
 
     def _open_ai_select_dialog(self, files):
         """弹出文件选择窗口：勾选要 AI 识别的文件（默认勾选当前文件）"""

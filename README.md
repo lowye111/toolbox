@@ -44,22 +44,32 @@ my toolbox for yolo learner
 | notes_dir | 参数扫描工具「说明」文件的保存目录（默认 toolbox/notes） |
 | tool_order | 菜单卡片的排列顺序（长按拖动后自动写入，清空则恢复默认） |
 
-## API Key 怎么放才安全
+## AI 识别：配置 API Key
 
-「AI 识别」需要一个 DeepSeek API Key。工具按下面的顺序取用，**越靠前越安全**：
+「参数扫描工具」的 AI 识别需要一个 DeepSeek API Key。**最简单的方式是用界面填**：
 
-1. **环境变量（推荐，Key 完全不落盘、也不会被误提交）**
+打开「参数扫描工具」→ 点顶部 **🔑 API 设置** → 粘贴 Key → 点「保存」。
+保存时会自动加密（见下），界面上只会显示打码后的 Key（如 `sk-620…803f`）。
 
-   在 PowerShell 里执行一次（之后新开的终端都生效）：
-   ```powershell
-   setx DEEPSEEK_API_KEY "sk-你的Key"
-   ```
+窗口里还有两个实用功能：
 
-2. **config.json 密文**：把 Key 填进 `deepseek_api_key` 字段，工具首次读取时会**自动加密**成
-   `deepseek_api_key_enc` 并清空明文字段。加密用的是 Windows DPAPI——密钥由当前 Windows
-   账户托管，**密文拷到别的电脑/别的账户无法解密**，所以即使 config.json 被提交或分享也不泄露。
+- **测试连接**：直接向 DeepSeek 查询，立刻告诉你 Key 是否可用；
+  失败时会带出服务端原因（例如 Key 已在后台被轮换/删除）。
+- **模型名**：可选 `deepseek-flash` / `deepseek-v4-pro`，也可直接输入其它模型名。
 
+如果还没配置 Key 就点「🤖 AI 识别」，工具会直接提示你打开这个设置窗口。
+
+### Key 的存储方式（越靠前优先级越高）
+
+1. **环境变量**：`setx DEEPSEEK_API_KEY "sk-你的Key"`（一次即可，Key 完全不落盘）
+2. **界面保存 / config.json 密文**：用 Windows DPAPI 加密后存进 `deepseek_api_key_enc`。
+   密钥由当前 Windows 账户托管，**密文拷到别的电脑/别的账户无法解密**，
+   所以即使 config.json 被提交或分享也不会泄露。
 3. **明文**：仅为兼容旧配置保留，读到时会自动迁移成密文。
+
+> 注意：环境变量优先级最高——如果界面里保存了 Key 但仍提示无效，
+> 先检查是否设置了 `DEEPSEEK_API_KEY` 环境变量（它会把界面配置覆盖掉）。
+> 设置窗口顶部会显示当前 Key 的来源。
 
 另外仓库内置了一个提交前检查（`tools/git-hooks/pre-commit`），会在 `git commit` 时扫描
 **暂存区内容与提交信息**，发现疑似 Key 就直接阻断提交。新克隆的仓库需要装一次：
@@ -88,7 +98,8 @@ Windows 下 `cv2.imread` / `cv2.imwrite` **不支持中文（非 ASCII）路径*
   - 双栏管理：预调栏（置顶常用参数）+ 参数列表
   - 一键置顶、隐藏参数（顶部「显示隐藏项」可找回）
   - 支持单条/批量保存，保存前留 `.bak` 备份，按原编码与行尾写回；关闭时生成修改日志
-  - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数（需配置 API Key，见上文「API Key 怎么放才安全」）
+  - 🤖 AI 识别（可选）：DeepSeek 过滤误报、生成用途说明、推荐置顶参数
+    （点顶部「🔑 API 设置」即可在界面里填 Key 并测试连接，见上文）
   - 📝 手动说明：为参数添加备注，集中保存（默认 toolbox/notes，可用 config.json 的 notes_dir 指定），重开同一工作区自动加载
 
 ### 2️⃣ 文件批量重命名 (change_name.py)
