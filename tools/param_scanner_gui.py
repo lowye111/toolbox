@@ -1500,7 +1500,9 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
-        cur_key, cur_model = get_ai_settings()
+        # 只用于初始化界面默认值；保存/测试时一律实时读取
+        # （不要在逻辑里用这里的快照，否则刚保存的新 Key 会被旧值覆盖）
+        _cur_key, cur_model = get_ai_settings()
         src = key_source()
 
         src_text = {
@@ -1540,10 +1542,20 @@ class App(tk.Tk):
         ttk.Checkbutton(body, text="显示", variable=show_var,
                         command=toggle_show).grid(row=0, column=2, sticky="w")
 
-        if cur_key:
-            tk.Label(body, text=f"已保存：{mask_key(cur_key)}（留空则保持不变）",
-                     bg=c["bg"], fg=c["text_muted"], font=ui_theme.ui_font(9),
-                     anchor="w").grid(row=1, column=1, columnspan=2, sticky="w")
+        # "已保存"提示：始终创建，保存后由 refresh_saved_label() 更新内容
+        saved_lbl = tk.Label(body, text="", bg=c["bg"], fg=c["text_muted"],
+                             font=ui_theme.ui_font(9), anchor="w")
+        saved_lbl.grid(row=1, column=1, columnspan=2, sticky="w")
+
+        def refresh_saved_label():
+            """刷新"已保存"提示：保存后要立刻反映新的 Key，而不是停在打开时的快照"""
+            latest = get_ai_settings()[0]
+            if latest:
+                saved_lbl.config(text=f"已保存：{mask_key(latest)}（留空则保持不变）")
+            else:
+                saved_lbl.config(text="尚未保存 Key")
+
+        refresh_saved_label()
 
         # 模型输入（可编辑下拉）
         tk.Label(body, text="模型名：", bg=c["bg"], fg=c["text"],
@@ -1575,21 +1587,29 @@ class App(tk.Tk):
         btns.pack(fill=tk.X, padx=16, pady=(10, 14))
 
         def on_test():
-            key = key_var.get().strip() or cur_key
+            # 优先测"输入框里的"（用户正在填的），没填才用"已保存的"。
+            # 已保存的 Key 必须每次实时读取：窗口打开后可能刚保存过新 Key，
+            # 用打开时的快照会测到旧 Key。
+            typed = key_var.get().strip()
+            key = typed or get_ai_settings()[0]
             if not key:
-                set_status("请先填写 API Key", False)
+                set_status("请先填写或保存 API Key", False)
                 return
             set_status("正在测试连接…")
             dlg.update_idletasks()
             ok, msg = test_api_connection(key, model_var.get().strip())
-            set_status(("✅ " if ok else "❌ ") + msg, ok)
+            suffix = "" if typed else "（使用的是已保存的 Key）"
+            set_status(("✅ " if ok else "❌ ") + msg + suffix, ok)
 
         def on_save():
             key = key_var.get().strip()
-            if not key and not cur_key:
+            # 输入框留空表示"保持已保存的 Key 不变"，这里也要实时读，
+            # 避免用打开窗口时的旧快照把刚存的新 Key 覆盖掉
+            if not key and not get_ai_settings()[0]:
                 set_status("请填写 API Key", False)
                 return
-            ok, msg = save_ai_settings(key if key else cur_key, model_var.get().strip())
+            ok, msg = save_ai_settings(key if key else get_ai_settings()[0],
+                                       model_var.get().strip())
             if not ok:
                 set_status("❌ " + msg, False)
                 return
@@ -1598,6 +1618,7 @@ class App(tk.Tk):
                 f"✅ 已保存（模型：{new_model}，Key：{mask_key(new_key)}）"
                 f"\nKey 已加密保存在 config.json，绑定本机 Windows 账户。", True)
             key_var.set("")
+            refresh_saved_label()
 
         ttk.Button(btns, text="测试连接", command=on_test).pack(side=tk.LEFT)
         ttk.Button(btns, text="保存", style="Primary.TButton",
