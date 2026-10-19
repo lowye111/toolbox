@@ -339,13 +339,22 @@ def match_param_line(line):
     return None
 
 
-# 扫描时跳过的目录（ROS 构建产物 devel/build/install，以及版本库/缓存/依赖目录，
-# 避免扫到自动生成的样板文件或第三方代码）
+# 扫描时跳过的目录：只跳过"几乎不可能放源码"的版本库/缓存/虚拟环境目录。
+#
+# 注意：这里只保留高置信度的名字。之前还跳过 build / install / devel，
+# 但它们在不同项目里也可能是源码目录（非 ROS 项目、或源码放错层），
+# 一旦误跳就会整个工作区扫不出文件——宁可多扫几个生成文件，
+# 也不要让用户看到一片空白。
 SKIP_DIRS = {
-    "devel", "build", "install",
-    ".git", ".svn", ".hg", "__pycache__", "node_modules",
-    ".idea", ".vscode", ".venv", "venv", "site-packages",
+    ".git", ".svn", ".hg", "__pycache__",
+    "node_modules", ".venv", "venv", "site-packages",
+    ".idea", ".vscode",
 }
+
+# ROS 的构建产物目录：仅当它们是"被扫描目录的直接子目录"时才跳过，
+# 这样扫描 <ws> 时会忽略 <ws>/build、<ws>/install，
+# 但 <ws>/src/build 这类可能是源码的深层目录不会被误伤。
+BUILD_DIR_NAMES = {"devel", "build", "install"}
 
 
 def scan_folder(folder):
@@ -354,12 +363,24 @@ def scan_folder(folder):
     param_map = {}
     all_files = []
 
-    for root, dirs, files in os.walk(folder):
-        # 原地剪枝：跳过构建产物目录（不区分大小写）
-        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
+    root_abs = os.path.abspath(folder)
+
+    for cur_root, dirs, files in os.walk(folder):
+        # 原地剪枝：只跳过高置信度目录；构建产物目录仅在顶层跳过
+        at_top = os.path.normcase(os.path.abspath(cur_root)) == os.path.normcase(root_abs)
+        kept = []
+        for d in dirs:
+            low = d.lower()
+            if low in SKIP_DIRS:
+                continue
+            if low in BUILD_DIR_NAMES and at_top:
+                continue
+            kept.append(d)
+        dirs[:] = kept
+
         for fn in files:
             if fn.lower().endswith(exts):
-                fp = os.path.abspath(os.path.join(root, fn))
+                fp = os.path.abspath(os.path.join(cur_root, fn))
                 all_files.append(fp)
                 params = scan_file(fp)
                 if params:
@@ -990,10 +1011,26 @@ class App(tk.Tk):
                 if key in hid_set:
                     p["hidden"] = True
         self.all_files = [fp for fp in self._scanned_all if fp not in self.closed_files]
+        hidden_by_session = len(self._scanned_all) - len(self.all_files)
+
+        # 如果扫描到了文件、但全部被上次的"关闭状态"隐藏，就直接恢复显示：
+        # 否则用户看到的是空标签栏，会误以为工具扫不出文件。
+        if hidden_by_session > 0 and not self.all_files:
+            self.closed_files.clear()
+            self.all_files = list(self._scanned_all)
+            hidden_by_session = 0
+            auto_restored = True
+        else:
+            auto_restored = False
+
         info = f"{os.path.basename(folder)} | 已扫描：{len(scanned_files)} | 含参数文件：{len(self._scanned_all)}"
         if loaded:
             info += f" | 已载说明：{loaded} 条"
-        if self.closed_files or prio_set or hid_set:
+        if auto_restored:
+            info += " | 已自动恢复显示全部文件（上次是关闭状态）"
+        elif hidden_by_session > 0:
+            info += f" | ⚠ 有 {hidden_by_session} 个文件处于关闭状态（点「↩ 恢复关闭文件」找回）"
+        elif prio_set or hid_set:
             info += " | 已恢复上次工作状态"
         self.info_label.config(text=info)
         self.rebuild_tabs()
